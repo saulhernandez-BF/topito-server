@@ -16,7 +16,9 @@ app.use((req, res, next) => {
 	next();
 });
 
-const genAI = new GoogleGenerativeAI("AIzaSyBvh6V0-NjBItDIGrCPMvFftfZ_CFIAVas");
+const genAI = new GoogleGenerativeAI({
+	apiKey: process.env.GOOGLE_API_KEY,
+});
 
 const referenceData = JSON.parse(
 	fs.readFileSync(new URL("./bNfWeb_clean.json", import.meta.url), "utf-8"),
@@ -49,6 +51,8 @@ ${prompt}
 	}
 });
 
-app.listen(3000, () => {
-	console.log("Server running on http://localhost:3000");
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+	console.log(`Server running on http://localhost:${PORT}`);
 });
