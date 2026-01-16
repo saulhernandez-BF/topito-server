@@ -16,9 +16,12 @@ app.use((req, res, next) => {
 	next();
 });
 
+console.log("GOOGLE_API_KEY:", process.env.GOOGLE_API_KEY?.slice(0, 10) + "...");
+
 const genAI = new GoogleGenerativeAI({
 	apiKey: process.env.GOOGLE_API_KEY,
 });
+
 console.log("GOOGLE_API_KEY:", process.env.GOOGLE_API_KEY?.slice(0, 10) + "...");
 
 
