@@ -19,6 +19,8 @@ app.use((req, res, next) => {
 const genAI = new GoogleGenerativeAI({
 	apiKey: process.env.GOOGLE_API_KEY,
 });
+console.log("GOOGLE_API_KEY:", process.env.GOOGLE_API_KEY?.slice(0, 10) + "...");
+
 
 const referenceData = JSON.parse(
 	fs.readFileSync(new URL("./bNfWeb_clean.json", import.meta.url), "utf-8"),
