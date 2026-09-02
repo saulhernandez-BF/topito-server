@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Environment variables (contiene la API key, nunca se sube)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+
+# Registro de uso/costo de las llamadas a la IA (datos operativos, no código)
+usage-log.jsonl
+
+# Embeddings de referencia (regenerable con "npm run build-embeddings")
+tuning-embeddings.json
+
+# Estado de paginación de fetch-meta-ads.mjs -- contiene el META_ACCESS_TOKEN
+# embebido en la URL de "siguiente página", nunca se debe subir a git.
+.meta-ads-state.json
