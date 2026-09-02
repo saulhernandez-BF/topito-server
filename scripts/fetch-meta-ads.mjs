@@ -11,7 +11,7 @@
 // Corridas siguientes (refresh incremental): en cuanto una marca termina su
 // backfill completo se guarda data/<marca>/.meta-ads-done con la fecha. Desde ahí,
 // cada corrida solo pide a Meta los anuncios creados después de la última corrida
-// exitosa (filtering por creation_time), así que son rápidas y casi nunca chocan
+// exitosa (filtering por created_time), así que son rápidas y casi nunca chocan
 // con el límite de tasa -- así se puede dejar corriendo periódicamente (ver
 // .github/workflows/refresh-brand-data.yml) sin volver a escanear todo el historial.
 //
@@ -281,13 +281,13 @@ async function processBackfill(brand, accountId, startedAt) {
 }
 
 // Refresh incremental: ya se hizo el backfill completo antes, así que solo se piden
-// los anuncios creados después de la última corrida exitosa (filtro creation_time).
+// los anuncios creados después de la última corrida exitosa (filtro created_time).
 // Pensado para correr periódico (ej. GitHub Actions semanal) sin re-escanear todo.
 async function processIncremental(brand, accountId, doneInfo, startedAt) {
 	const sinceIso = doneInfo.lastIncrementalRunAt || doneInfo.backfillCompletedAt;
 	const sinceUnix = Math.floor(new Date(sinceIso).getTime() / 1000);
 	const filtering = encodeURIComponent(
-		JSON.stringify([{ field: "creation_time", operator: "GREATER_THAN", value: sinceUnix }]),
+		JSON.stringify([{ field: "created_time", operator: "GREATER_THAN", value: sinceUnix }]),
 	);
 	let url = `${BASE_URL}/${accountId}/ads?fields=${encodeURIComponent(FIELDS)}&limit=${PAGE_LIMIT}&filtering=${filtering}&access_token=${META_ACCESS_TOKEN}`;
 
