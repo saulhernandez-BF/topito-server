@@ -1,0 +1,90 @@
+name: Refrescar datos de marca (Meta Ads + embeddings)
+
+# Se corre solo (semanal) o manualmente desde la pestaña "Actions" de GitHub
+# ("Run workflow"). Actualiza data/<marca>/tuning.json con anuncios nuevos de
+# Meta y recalcula los embeddings pendientes, y si hay cambios los sube a main
+# -- Render despliega automáticamente desde ahí.
+on:
+  schedule:
+    - cron: "0 9 * * 1" # lunes 09:00 UTC (~03:00 hora CDMX)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-brand-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Refrescar anuncios de Meta Ads
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+        run: |
+          set -e
+          for i in $(seq 1 15); do
+            echo "=== fetch-meta-ads intento $i/15 ==="
+            OUTPUT=$(npm run fetch-meta-ads 2>&1) && STATUS=0 || STATUS=$?
+            echo "$OUTPUT"
+            if [ "$STATUS" -ne 0 ]; then
+              echo "fetch-meta-ads terminó con error, se aborta este paso."
+              exit "$STATUS"
+            fi
+            if echo "$OUTPUT" | grep -q "^Listo\."; then
+              echo "Meta Ads al día."
+              break
+            fi
+            WAIT_MIN=$(echo "$OUTPUT" | grep -oE "esperar ~[0-9]+ min" | grep -oE "[0-9]+" | tail -1)
+            WAIT_MIN=${WAIT_MIN:-2}
+            echo "Todavía falta al menos una marca -- esperando ${WAIT_MIN} min antes de reintentar..."
+            sleep "${WAIT_MIN}m"
+          done
+
+      - name: Recalcular embeddings pendientes
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          set -e
+          for i in $(seq 1 10); do
+            echo "=== build-embeddings intento $i/10 ==="
+            OUTPUT=$(npm run build-embeddings 2>&1) && STATUS=0 || STATUS=$?
+            echo "$OUTPUT"
+            if [ "$STATUS" -ne 0 ]; then
+              echo "build-embeddings terminó con error, se aborta este paso."
+              exit "$STATUS"
+            fi
+            if echo "$OUTPUT" | grep -q "^Listo\."; then
+              echo "Embeddings al día."
+              break
+            fi
+            echo "Todavía falta al menos una marca -- esperando 1 min antes de reintentar..."
+            sleep 1m
+          done
+
+      - name: Commit y push si hay cambios
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- data/; then
+            echo "Sin cambios en data/, nada que subir."
+            exit 0
+          fi
+          git add data/
+          git commit -m "chore: refresh brand data (Meta Ads + embeddings) [automated]"
+          git push
