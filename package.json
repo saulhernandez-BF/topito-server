@@ -1,13 +1,18 @@
 {
-	"dependencies": {
-		"@google/generative-ai": "^0.24.1",
-		"cors": "^2.8.5",
-		"express": "^5.2.1",
-		"nodemon": "^3.1.11"
-	},
-	"scripts": {
-		"dev": "nodemon server.mjs",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon server.mjs",
     "test": "node test.mjs",
-    "start": "node server.mjs"
-	}
+    "start": "node server.mjs",
+    "build-embeddings": "node scripts/build-embeddings.mjs",
+    "fetch-meta-ads": "node scripts/fetch-meta-ads.mjs"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  }
 }
