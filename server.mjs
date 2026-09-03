@@ -45,6 +45,13 @@ app.use((req, res, next) => {
 	next();
 });
 
+// Endpoint de salud: no toca ninguna IA ni gasta tokens -- pensado para que un
+// cronjob externo haga ping periódico y evite que Render duerma el server por
+// inactividad, sin que eso cueste nada de uso de Gemini/Claude.
+app.get("/health", (req, res) => {
+	res.json({ status: "ok", uptimeSeconds: Math.round(process.uptime()) });
+});
+
 // --- Marcas soportadas ---
 // Cada marca tiene su propio dataset de tono (data/<marca>/tuning.json) y su propio
 // cache de embeddings (data/<marca>/tuning-embeddings.json). El plugin manda `brand`
@@ -55,6 +62,59 @@ const BRANDS = {
 };
 const DEFAULT_BRAND = "benandfrank";
 const MAX_REFERENCE_TEXT_LENGTH = 400; // descarta texto legal (avisos de privacidad, TyC, etc.)
+
+// fetch con timeout: si Gemini/Claude se cuelgan, la petición del plugin no se
+// queda esperando para siempre -- después de FETCH_TIMEOUT_MS se aborta y se
+// convierte en un error manejado normal (ver respondWithError).
+const FETCH_TIMEOUT_MS = 30_000;
+
+async function fetchWithTimeout(url, options = {}) {
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+	try {
+		return await fetch(url, { ...options, signal: controller.signal });
+	} catch (err) {
+		if (err.name === "AbortError") {
+			const timeoutError = new Error("La API tardó demasiado en responder.");
+			timeoutError.details = { message: "timeout", timeoutMs: FETCH_TIMEOUT_MS };
+			throw timeoutError;
+		}
+		throw err;
+	} finally {
+		clearTimeout(timeout);
+	}
+}
+
+// Algunas fallas (proxy caído, 502 de Cloudflare, etc.) devuelven HTML en vez de
+// JSON -- sin esto, response.json() tronaría con un SyntaxError poco claro.
+async function parseJsonResponse(response, providerLabel) {
+	try {
+		return await response.json();
+	} catch {
+		const error = new Error(`Respuesta inválida de ${providerLabel} (status ${response.status}).`);
+		error.details = { status: response.status };
+		throw error;
+	}
+}
+
+// Log completo (con detalles internos) para nosotros, pero al plugin solo le
+// llega un mensaje genérico y seguro -- nunca el objeto de error crudo del
+// proveedor, que puede traer detalles que no le corresponden al cliente.
+function respondWithError(res, err, context) {
+	console.error(`[${context}] Error:`, err.details ?? err);
+	const code = err.details?.code ?? err.details?.status;
+	const type = err.details?.type;
+	const isRateLimited = code === 429 || type === "rate_limit_error" || type === "overloaded_error";
+	const isTimeout = err.details?.message === "timeout";
+
+	if (isRateLimited) {
+		return res.status(429).json({ error: "El servicio de IA está saturado en este momento. Intenta de nuevo en unos segundos." });
+	}
+	if (isTimeout) {
+		return res.status(504).json({ error: "La IA tardó demasiado en responder. Intenta de nuevo." });
+	}
+	return res.status(500).json({ error: "Ocurrió un error al procesar la solicitud. Intenta de nuevo en unos momentos." });
+}
 
 function cosineSimilarity(a, b) {
 	let dot = 0;
@@ -148,7 +208,7 @@ function buildStyleReference(brand, sampleSize = 20) {
 // embeddings de referencia (RETRIEVAL_DOCUMENT) y elegir los más relevantes.
 async function embedQuery(text) {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GOOGLE_API_KEY}`;
-	const res = await fetch(url, {
+	const res = await fetchWithTimeout(url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
@@ -158,9 +218,11 @@ async function embedQuery(text) {
 			outputDimensionality: EMBEDDING_DIMENSIONS,
 		}),
 	});
-	const data = await res.json();
+	const data = await parseJsonResponse(res, "Gemini embeddings");
 	if (data.error) {
-		throw new Error(`Error de Gemini embeddings: ${JSON.stringify(data.error)}`);
+		const error = new Error(data.error.message || "Error de Gemini embeddings");
+		error.details = data.error;
+		throw error;
 	}
 	return data.embedding.values;
 }
@@ -238,7 +300,7 @@ function logUsage({ endpoint, provider, model, inputTokens, outputTokens }) {
 async function callGemini(promptText, model) {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_API_KEY}`;
 
-	const response = await fetch(url, {
+	const response = await fetchWithTimeout(url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
@@ -246,7 +308,7 @@ async function callGemini(promptText, model) {
 		}),
 	});
 
-	const data = await response.json();
+	const data = await parseJsonResponse(response, "Gemini");
 
 	if (data.error) {
 		console.error("Error de Gemini:", data.error);
@@ -266,7 +328,7 @@ async function callGemini(promptText, model) {
 
 // Llama a Claude (Anthropic Messages API) y devuelve { text, usage }
 async function callClaude(promptText, model) {
-	const response = await fetch("https://api.anthropic.com/v1/messages", {
+	const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
@@ -283,7 +345,7 @@ async function callClaude(promptText, model) {
 		}),
 	});
 
-	const data = await response.json();
+	const data = await parseJsonResponse(response, "Claude");
 
 	if (data.error) {
 		console.error("Error de Claude:", data.error);
@@ -329,8 +391,7 @@ app.post("/ortografia", async (req, res) => {
 		});
 		res.json({ correctedText });
 	} catch (err) {
-		console.error(err);
-		res.status(500).json({ error: err.details ?? String(err) });
+		respondWithError(res, err, "/ortografia");
 	}
 });
 
@@ -361,8 +422,7 @@ ${prompt}
 		});
 		res.json({ correctedText });
 	} catch (err) {
-		console.error(err);
-		res.status(500).json({ error: err.details ?? String(err) });
+		respondWithError(res, err, "/reescribir");
 	}
 });
 
@@ -395,8 +455,7 @@ Dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato
 		});
 		res.json({ text });
 	} catch (err) {
-		console.error(err);
-		res.status(500).json({ error: err.details ?? String(err) });
+		respondWithError(res, err, "/generate");
 	}
 });
 

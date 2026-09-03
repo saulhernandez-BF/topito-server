@@ -1,0 +1,28 @@
+name: Keep-alive del server (Render)
+
+# Hace ping a /health cada 10 min para que Render no apague el server por
+# inactividad (free tier). /health no llama a ninguna IA, así que esto no
+# genera ningún costo de Gemini/Claude -- solo mantiene el proceso despierto.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping /health
+        run: |
+          STATUS=$(curl -s -o /tmp/body.json -w "%{http_code}" --max-time 30 https://topito-server.onrender.com/health)
+          echo "status: $STATUS"
+          cat /tmp/body.json
+          if [ "$STATUS" != "200" ]; then
+            echo "El server no respondió 200 (puede estar despertando de un cold start) -- reintentando una vez..."
+            sleep 20
+            STATUS=$(curl -s -o /tmp/body.json -w "%{http_code}" --max-time 30 https://topito-server.onrender.com/health)
+            echo "status (reintento): $STATUS"
+            cat /tmp/body.json
+            [ "$STATUS" = "200" ]
+          fi

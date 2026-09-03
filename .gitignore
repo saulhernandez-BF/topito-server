@@ -16,8 +16,9 @@ npm-debug.log*
 # Registro de uso/costo de las llamadas a la IA (datos operativos, no código)
 usage-log.jsonl
 
-# Embeddings de referencia (regenerable con "npm run build-embeddings")
-tuning-embeddings.json
+# (tuning-embeddings.json SÍ se sube a git a propósito: es lo que Render necesita
+# para tener la selección de referencia por relevancia en producción. El workflow
+# semanal de GitHub Actions lo recalcula y lo comitea junto con tuning.json.)
 
 # Estado de paginación de fetch-meta-ads.mjs -- contiene el META_ACCESS_TOKEN
 # embebido en la URL de "siguiente página", nunca se debe subir a git.
