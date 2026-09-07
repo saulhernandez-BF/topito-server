@@ -12,9 +12,15 @@ app.use(express.json());
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-const GEMINI_MODEL_FAST = process.env.GEMINI_MODEL_FAST || "gemini-2.5-flash-lite";
-// Ortografía: tarea mecánica y de alto volumen -> se queda en Gemini (barato/gratis).
-// Reescribir y Crear: copy de marca -> Claude, que respeta mejor el tono.
+// Gemini free-tier tiene un límite de ~20 peticiones/minuto por modelo que se nos
+// agotó fácil en pruebas, y flash-lite además se comía tildes reales (ej. "estás" ->
+// "estas") y typos dobles (ej. "mismmo"). Por eso, por el momento, /ortografia se
+// mueve a Claude (ver CLAUDE_MODEL_ORTOGRAFIA) y no se usa Gemini para generación.
+// GEMINI_MODEL_FAST queda sin uso mientras tanto -- se deja definida por si se
+// quiere volver a Gemini más adelante (ej. si se resuelve la cuota).
+const GEMINI_MODEL_FAST = process.env.GEMINI_MODEL_FAST || "gemini-2.5-flash";
+// Ortografía: tarea mecánica y de alto volumen -> Haiku (barato). Reescribir y Crear: copy de marca -> Sonnet, que respeta mejor el tono.
+const CLAUDE_MODEL_ORTOGRAFIA = process.env.CLAUDE_MODEL_ORTOGRAFIA || "claude-haiku-4-5-20251001";
 const CLAUDE_MODEL_REESCRIBIR = process.env.CLAUDE_MODEL_REESCRIBIR || "claude-sonnet-5";
 const CLAUDE_MODEL_GENERATE = process.env.CLAUDE_MODEL_GENERATE || "claude-sonnet-5";
 const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
@@ -61,6 +67,39 @@ const BRANDS = {
 	bombavista: { label: "Bombavista" },
 };
 const DEFAULT_BRAND = "benandfrank";
+
+// --- Formatos/canales soportados en /reescribir y /generate ---
+// El plugin manda `format` en el body para que el copy salga ya ajustado al canal
+// donde se va a usar, en vez de un texto genérico que hay que recortar después.
+// "general" (default) mantiene el comportamiento de siempre, sin restricciones.
+const FORMATS = {
+	general: { label: "General", guidance: "" },
+	headline: {
+		label: "Headline de anuncio",
+		guidance:
+			"Este texto es el HEADLINE/título grande de un anuncio (Meta, Google, etc). Debe ser muy corto y directo: máximo 6-8 palabras, sin verbos de relleno ni conectores largos. Va solo, sin contexto alrededor, así que tiene que entenderse de un vistazo.",
+	},
+	primario: {
+		label: "Texto primario de anuncio",
+		guidance:
+			"Este texto es el CUERPO/texto primario de un anuncio de Meta o Instagram. Las plataformas lo cortan con un botón 'ver más' alrededor de los 125 caracteres, así que el gancho principal tiene que ir en la primera línea. Puede tener 2-3 líneas cortas en total.",
+	},
+	caption: {
+		label: "Caption de redes sociales",
+		guidance:
+			"Este texto es un caption para Instagram u otra red social. Tono cercano y conversacional, como si le hablaras directo a un seguidor. Puede usar emojis y un hashtag al final si el ejemplo de tono los usa, y puede ser un poco más largo que un anuncio.",
+	},
+	web: {
+		label: "Copy de página web",
+		guidance:
+			"Este texto es para una página del sitio web (no un anuncio). Debe ser claro y enfocado en el beneficio para el cliente, sin la urgencia de un anuncio pagado. No tiene límite estricto de longitud, pero cada oración debe aportar algo -- nada de relleno.",
+	},
+};
+const DEFAULT_FORMAT = "general";
+
+function resolveFormat(format) {
+	return FORMATS[format] ? format : DEFAULT_FORMAT;
+}
 const MAX_REFERENCE_TEXT_LENGTH = 400; // descarta texto legal (avisos de privacidad, TyC, etc.)
 
 // fetch con timeout: si Gemini/Claude se cuelgan, la petición del plugin no se
@@ -102,9 +141,18 @@ async function parseJsonResponse(response, providerLabel) {
 // proveedor, que puede traer detalles que no le corresponden al cliente.
 function respondWithError(res, err, context) {
 	console.error(`[${context}] Error:`, err.details ?? err);
-	const code = err.details?.code ?? err.details?.status;
+	const code = err.details?.code;
+	const status = err.details?.status;
 	const type = err.details?.type;
-	const isRateLimited = code === 429 || type === "rate_limit_error" || type === "overloaded_error";
+	// 429 = rate limit; 503/UNAVAILABLE = el modelo de Gemini está saturado (no es
+	// culpa nuestra, y reintentar en unos segundos casi siempre funciona) -- ambos
+	// casos son "el proveedor está saturado", así que comparten el mismo mensaje.
+	const isRateLimited =
+		code === 429 ||
+		code === 503 ||
+		status === "UNAVAILABLE" ||
+		type === "rate_limit_error" ||
+		type === "overloaded_error";
 	const isTimeout = err.details?.message === "timeout";
 
 	if (isRateLimited) {
@@ -296,8 +344,53 @@ function logUsage({ endpoint, provider, model, inputTokens, outputTokens }) {
 	}
 }
 
-// Llama a Gemini y devuelve { text, usage }
-async function callGemini(promptText, model) {
+// --- Feedback del usuario sobre las opciones que genera la IA (ver /feedback) ---
+// "like" = muy buena, "neutral" = buena pero necesita trabajo, "bad" = no se eligió
+// (el usuario le dio "intentar de nuevo" sin calificarla, o navegó a otra opción).
+const FEEDBACK_LOG_PATH = path.join(__dirname, "feedback-log.jsonl");
+
+function logFeedback({ text, rating, source, brand, original }) {
+	const entry = {
+		timestamp: new Date().toISOString(),
+		brand,
+		source, // "reescribir" o "crear": qué endpoint generó el texto calificado
+		rating,
+		text,
+		original: original ?? null, // el texto original que se pidió reescribir, si aplica
+	};
+	try {
+		fs.appendFileSync(FEEDBACK_LOG_PATH, JSON.stringify(entry) + "\n");
+	} catch (err) {
+		console.error("No se pudo escribir el log de feedback:", err);
+	}
+}
+
+// Un "like" se guarda como nuevo ejemplo de tono para esa marca. No se usa de
+// inmediato para elegir referencias por relevancia (eso necesita su embedding,
+// que se calcula en el próximo "npm run build-embeddings" / workflow semanal),
+// pero sí queda disponible ya mismo para el muestreo al azar de respaldo, y así
+// -- poco a poco -- las generaciones futuras se acercan más a lo que sí gustó.
+function addLikedTextToTuning(brand, text) {
+	const dir = path.join(__dirname, "data", brand);
+	const tuningPath = path.join(dir, "tuning.json");
+
+	let existing = [];
+	try {
+		existing = JSON.parse(fs.readFileSync(tuningPath, "utf-8"));
+	} catch {
+		existing = [];
+	}
+
+	if (existing.some((item) => item.text === text)) return; // ya estaba, no lo dupliques
+
+	existing.push({ url: null, source: "feedback-like", text });
+	fs.writeFileSync(tuningPath, JSON.stringify(existing, null, 2));
+	brandData[brand] = loadBrandData(brand); // refresca en memoria en esta misma corrida
+}
+
+// Llama a Gemini y devuelve { text, usage }. generationConfig es opcional (por
+// ejemplo, temperature: 0 para tareas mecánicas donde no queremos variación).
+async function callGemini(promptText, model, generationConfig) {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_API_KEY}`;
 
 	const response = await fetchWithTimeout(url, {
@@ -305,6 +398,7 @@ async function callGemini(promptText, model) {
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
 			contents: [{ parts: [{ text: promptText }] }],
+			...(generationConfig ? { generationConfig } : {}),
 		}),
 	});
 
@@ -326,8 +420,9 @@ async function callGemini(promptText, model) {
 	return { text, usage };
 }
 
-// Llama a Claude (Anthropic Messages API) y devuelve { text, usage }
-async function callClaude(promptText, model) {
+// Llama a Claude (Anthropic Messages API) y devuelve { text, usage }. temperature
+// es opcional (0 para tareas mecánicas como ortografía, donde no queremos variación).
+async function callClaude(promptText, model, { temperature } = {}) {
 	const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
 		method: "POST",
 		headers: {
@@ -341,6 +436,7 @@ async function callClaude(promptText, model) {
 			// El razonamiento extendido no aporta nada para copy corto y casi duplica
 			// el costo de salida (se cobra como output tokens); lo desactivamos.
 			thinking: { type: "disabled" },
+			...(typeof temperature === "number" ? { temperature } : {}),
 			messages: [{ role: "user", content: promptText }],
 		}),
 	});
@@ -379,14 +475,29 @@ function requirePrompt(req, res) {
 app.post("/ortografia", async (req, res) => {
 	const prompt = requirePrompt(req, res);
 	if (prompt === null) return;
+	const brand = resolveBrand(req, res);
+	if (brand === null) return;
 
 	try {
-		const fullPrompt = `Corrige la ortografía y gramática del siguiente texto en español y solo escribe el texto corregido:\n\n${prompt}`;
-		const { text: correctedText, usage } = await callGemini(fullPrompt, GEMINI_MODEL_FAST);
+		const fullPrompt = `Eres un corrector ortográfico de textos en español para redes sociales y anuncios de ${BRANDS[brand].label}. El texto siempre debe tratar al lector de "tú", nunca de "vos" -- ninguna de nuestras marcas usa voseo.
+
+Corrige estos errores:
+- Ortografía, tildes faltantes o de más, letras repetidas o cambiadas de lugar, y errores de tipeo. Revisa con cuidado las tildes obligatorias (cómo, estás, está, qué, más, así, etc.) -- es el error más común y el que más se pasa por alto.
+- Cualquier forma de voseo (comprá, tenés, sabés, vení, "vos") -- conviértelo siempre a la forma con "tú" (compra, tienes, sabes, ven). Para esta marca el voseo es un error, no una variante regional válida.
+
+No cambies nada más que eso: conserva el vocabulario, el tono y la puntuación. No agregues ni quites palabras, no reformules.
+
+Responde ÚNICAMENTE con el texto corregido, sin comillas ni explicación.
+
+Texto:
+${prompt}`;
+		const { text: correctedText, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_ORTOGRAFIA, {
+			temperature: 0,
+		});
 		logUsage({
 			endpoint: "/ortografia",
-			provider: "gemini",
-			model: GEMINI_MODEL_FAST,
+			provider: "claude",
+			model: CLAUDE_MODEL_ORTOGRAFIA,
 			...usage,
 		});
 		res.json({ correctedText });
@@ -400,16 +511,20 @@ app.post("/reescribir", async (req, res) => {
 	if (prompt === null) return;
 	const brand = resolveBrand(req, res);
 	if (brand === null) return;
+	const format = resolveFormat(req.body?.format);
 
 	try {
 		const referenceText = await buildRelevantReference(prompt, "/reescribir", brand);
+		const formatGuidance = FORMATS[format].guidance
+			? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
+			: "";
 		const fullPrompt = `
 Eres un asistente que debe crear textos publicitarios (copy) respetando mi voz y tono.
 Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos por ser los más
 parecidos en tema al texto que me pediste reescribir:
 
 ${referenceText}
-
+${formatGuidance}
 Ahora, con base en ese estilo, reescribe el siguiente texto para que se ajuste a mi voz y tono, solo dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato de lista y limitate a solo poner las opciones no necesito nada antes ni despues de eso. el formato de lista siempre sera (* opcion1, * opcion2, * opcion3, * opcion4), no quiero que pongas ni un texto más:
 ${prompt}
 `;
@@ -431,16 +546,20 @@ app.post("/generate", async (req, res) => {
 	if (prompt === null) return;
 	const brand = resolveBrand(req, res);
 	if (brand === null) return;
+	const format = resolveFormat(req.body?.format);
 
 	try {
 		const referenceText = await buildRelevantReference(prompt, "/generate", brand);
+		const formatGuidance = FORMATS[format].guidance
+			? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
+			: "";
 		const fullPrompt = `
 Eres un asistente que debe crear textos publicitarios (copy) respetando mi voz y tono.
 Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos por ser los más
 parecidos en tema a lo que me pediste:
 
 ${referenceText}
-
+${formatGuidance}
 Ahora, con base en ese estilo, responde a esta petición:
 ${prompt}
 
@@ -456,6 +575,34 @@ Dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato
 		res.json({ text });
 	} catch (err) {
 		respondWithError(res, err, "/generate");
+	}
+});
+
+// El plugin manda esto cuando el usuario califica una opción generada por IA
+// (👍 muy buena, ⚪ buena pero necesita trabajo), o automáticamente con rating
+// "bad" cuando el usuario le da "intentar de nuevo" sin haber calificado ni
+// aplicado alguna de las opciones mostradas -- se asume que esas no sirvieron.
+app.post("/feedback", (req, res) => {
+	const { text, rating, source, original } = req.body ?? {};
+
+	if (typeof text !== "string" || text.trim().length === 0) {
+		return res.status(400).json({ error: "Falta el campo 'text' (texto) en el body." });
+	}
+	if (!["like", "neutral", "bad"].includes(rating)) {
+		return res.status(400).json({ error: "El campo 'rating' debe ser 'like', 'neutral' o 'bad'." });
+	}
+
+	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
+
+	try {
+		logFeedback({ text, rating, source: source || "desconocido", brand, original });
+		if (rating === "like") {
+			addLikedTextToTuning(brand, text);
+		}
+		res.json({ ok: true });
+	} catch (err) {
+		console.error("[/feedback] Error:", err);
+		res.status(500).json({ error: "No se pudo guardar el feedback." });
 	}
 });
 
@@ -529,6 +676,46 @@ app.get("/usage", (req, res) => {
 	}
 
 	res.json(summary);
+});
+
+// Reporte de las calificaciones que ha ido dejando el equipo sobre las opciones
+// generadas -- para ver, marca por marca, qué tanto está sirviendo la IA.
+// GET /feedback-summary  -> totales generales
+// GET /feedback-summary?brand=benandfrank -> solo esa marca
+app.get("/feedback-summary", (req, res) => {
+	let lines = [];
+	try {
+		lines = fs
+			.readFileSync(FEEDBACK_LOG_PATH, "utf-8")
+			.split("\n")
+			.filter(Boolean)
+			.map((l) => JSON.parse(l));
+	} catch {
+		lines = []; // aún no hay feedback registrado
+	}
+
+	if (req.query.brand) {
+		lines = lines.filter((l) => l.brand === req.query.brand);
+	}
+
+	const summary = { total: lines.length, byBrand: {}, bySource: {} };
+
+	for (const l of lines) {
+		summary.byBrand[l.brand] ??= { like: 0, neutral: 0, bad: 0 };
+		summary.byBrand[l.brand][l.rating] = (summary.byBrand[l.brand][l.rating] || 0) + 1;
+
+		summary.bySource[l.source] ??= { like: 0, neutral: 0, bad: 0 };
+		summary.bySource[l.source][l.rating] = (summary.bySource[l.source][l.rating] || 0) + 1;
+	}
+
+	res.json(summary);
+});
+
+// Mini-dashboard visual de /usage y /feedback-summary (para no tener que leer
+// JSON crudo). Es un archivo estático que hace fetch a esos mismos endpoints
+// desde el navegador, así que no necesita nada extra del server.
+app.get("/dashboard", (req, res) => {
+	res.sendFile(path.join(__dirname, "public", "dashboard.html"));
 });
 
 const PORT = process.env.PORT || 3000;

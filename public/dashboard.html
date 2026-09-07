@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="es">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>Topito · Dashboard</title>
+		<style>
+			:root {
+				--fg: #202020;
+				--bg: #fafbef;
+				--card-bg: #ffffff;
+				--border: #e2e2d8;
+				--muted: #6b6b62;
+				--like: #3f6c51;
+				--neutral: #3b5b7a;
+				--bad: #a8433a;
+			}
+			* {
+				box-sizing: border-box;
+			}
+			body {
+				margin: 0;
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+				background: var(--bg);
+				color: var(--fg);
+				padding: 24px 32px 60px;
+			}
+			h1 {
+				font-size: 22px;
+				margin: 0 0 4px;
+			}
+			.subtitulo {
+				color: var(--muted);
+				font-size: 13px;
+				margin: 0 0 28px;
+			}
+			h2 {
+				font-size: 15px;
+				text-transform: uppercase;
+				letter-spacing: 0.5px;
+				color: var(--muted);
+				margin: 36px 0 12px;
+			}
+			.filtros {
+				display: flex;
+				gap: 8px;
+				margin-bottom: 14px;
+				flex-wrap: wrap;
+			}
+			.chip {
+				background: transparent;
+				border: 2px solid var(--fg);
+				border-radius: 14px;
+				padding: 5px 14px;
+				font-size: 13px;
+				cursor: pointer;
+				color: var(--fg);
+			}
+			.chip.activo {
+				background: var(--fg);
+				color: var(--bg);
+			}
+			.tarjetas {
+				display: grid;
+				grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+				gap: 12px;
+				margin-bottom: 18px;
+			}
+			.tarjeta {
+				background: var(--card-bg);
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				padding: 14px 16px;
+			}
+			.tarjeta .valor {
+				font-size: 24px;
+				font-weight: 700;
+				line-height: 1.2;
+			}
+			.tarjeta .etiqueta {
+				font-size: 12px;
+				color: var(--muted);
+				margin-top: 2px;
+			}
+			table {
+				width: 100%;
+				border-collapse: collapse;
+				background: var(--card-bg);
+				border: 1px solid var(--border);
+				border-radius: 12px;
+				overflow: hidden;
+				font-size: 13px;
+			}
+			th,
+			td {
+				text-align: left;
+				padding: 8px 12px;
+				border-bottom: 1px solid var(--border);
+			}
+			th {
+				color: var(--muted);
+				font-weight: 600;
+				font-size: 12px;
+				text-transform: uppercase;
+			}
+			tr:last-child td {
+				border-bottom: none;
+			}
+			.barra {
+				display: flex;
+				height: 10px;
+				border-radius: 5px;
+				overflow: hidden;
+				background: var(--border);
+				min-width: 100px;
+			}
+			.barra span {
+				display: block;
+				height: 100%;
+			}
+			.vacio {
+				color: var(--muted);
+				font-size: 13px;
+				padding: 10px 0;
+			}
+			.error {
+				color: var(--bad);
+				font-size: 13px;
+			}
+			.pie {
+				margin-top: 40px;
+				font-size: 12px;
+				color: var(--muted);
+			}
+			.pie a {
+				color: var(--muted);
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Dashboard de Topito</h1>
+		<p class="subtitulo">
+			Uso/costo de las llamadas a la IA y feedback dejado sobre las opciones
+			generadas. Se actualiza al cambiar los filtros o recargar la página.
+		</p>
+
+		<h2>Uso y costo</h2>
+		<div class="filtros" id="filtros-uso">
+			<div class="chip activo" data-days="">Todo</div>
+			<div class="chip" data-days="7">Últimos 7 días</div>
+			<div class="chip" data-days="30">Últimos 30 días</div>
+		</div>
+		<div class="tarjetas" id="tarjetas-uso"></div>
+		<h2 style="margin-top: 20px; font-size: 13px">Por endpoint</h2>
+		<table id="tabla-endpoint">
+			<thead>
+				<tr>
+					<th>Endpoint</th>
+					<th>Peticiones</th>
+					<th>Costo estimado</th>
+				</tr>
+			</thead>
+			<tbody></tbody>
+		</table>
+		<h2 style="font-size: 13px">Por proveedor</h2>
+		<table id="tabla-proveedor">
+			<thead>
+				<tr>
+					<th>Proveedor</th>
+					<th>Peticiones</th>
+					<th>Costo estimado</th>
+				</tr>
+			</thead>
+			<tbody></tbody>
+		</table>
+
+		<h2>Feedback</h2>
+		<div class="filtros" id="filtros-feedback">
+			<div class="chip activo" data-brand="">Todas las marcas</div>
+			<div class="chip" data-brand="benandfrank">Ben &amp; Frank</div>
+			<div class="chip" data-brand="bombavista">Bombavista</div>
+		</div>
+		<div class="tarjetas" id="tarjetas-feedback"></div>
+		<h2 style="margin-top: 20px; font-size: 13px">Por marca</h2>
+		<table id="tabla-marca">
+			<thead>
+				<tr>
+					<th>Marca</th>
+					<th>Distribución</th>
+					<th>👍 Like</th>
+					<th>⚪ Neutral</th>
+					<th>👎 No suficiente</th>
+					<th>Total</th>
+				</tr>
+			</thead>
+			<tbody></tbody>
+		</table>
+		<h2 style="font-size: 13px">Por fuente (estilo / crear)</h2>
+		<table id="tabla-fuente">
+			<thead>
+				<tr>
+					<th>Fuente</th>
+					<th>Distribución</th>
+					<th>👍 Like</th>
+					<th>⚪ Neutral</th>
+					<th>👎 No suficiente</th>
+					<th>Total</th>
+				</tr>
+			</thead>
+			<tbody></tbody>
+		</table>
+
+		<p class="pie">
+			Datos leídos en vivo de <code>/usage</code> y
+			<code>/feedback-summary</code>. Este dashboard no requiere nada aparte del
+			server corriendo.
+		</p>
+
+		<script>
+			let selectedDays = "";
+			let selectedBrand = "";
+
+			function fmtUsd(n) {
+				return "$" + (n ?? 0).toFixed(4) + " USD";
+			}
+
+			function fmtNum(n) {
+				return (n ?? 0).toLocaleString("es-MX");
+			}
+
+			function celda(texto) {
+				const td = document.createElement("td");
+				td.textContent = texto;
+				return td;
+			}
+
+			async function cargarUso() {
+				const tarjetas = document.getElementById("tarjetas-uso");
+				const tbodyEndpoint = document.querySelector("#tabla-endpoint tbody");
+				const tbodyProveedor = document.querySelector("#tabla-proveedor tbody");
+				tarjetas.innerHTML = "";
+				tbodyEndpoint.innerHTML = "";
+				tbodyProveedor.innerHTML = "";
+
+				let data;
+				try {
+					const qs = selectedDays ? `?days=${selectedDays}` : "";
+					const res = await fetch(`/usage${qs}`);
+					data = await res.json();
+				} catch (err) {
+					tarjetas.innerHTML = `<div class="error">No se pudo cargar /usage: ${err}</div>`;
+					return;
+				}
+
+				const cards = [
+					{ valor: fmtNum(data.requests), etiqueta: "Peticiones" },
+					{ valor: fmtNum(data.totalInputTokens), etiqueta: "Tokens de entrada" },
+					{ valor: fmtNum(data.totalOutputTokens), etiqueta: "Tokens de salida" },
+					{ valor: fmtUsd(data.totalEstimatedCostUsd), etiqueta: "Costo estimado" },
+				];
+				for (const c of cards) {
+					const div = document.createElement("div");
+					div.className = "tarjeta";
+					div.innerHTML = `<div class="valor">${c.valor}</div><div class="etiqueta">${c.etiqueta}</div>`;
+					tarjetas.appendChild(div);
+				}
+
+				const endpoints = Object.entries(data.byEndpoint || {});
+				if (endpoints.length === 0) {
+					tbodyEndpoint.innerHTML =
+						'<tr><td colspan="3" class="vacio">Todavía no hay peticiones registradas.</td></tr>';
+				} else {
+					for (const [endpoint, info] of endpoints) {
+						const tr = document.createElement("tr");
+						tr.appendChild(celda(endpoint));
+						tr.appendChild(celda(fmtNum(info.requests)));
+						tr.appendChild(celda(fmtUsd(info.estimatedCostUsd)));
+						tbodyEndpoint.appendChild(tr);
+					}
+				}
+
+				const providers = Object.entries(data.byProvider || {});
+				if (providers.length === 0) {
+					tbodyProveedor.innerHTML =
+						'<tr><td colspan="3" class="vacio">Todavía no hay peticiones registradas.</td></tr>';
+				} else {
+					for (const [provider, info] of providers) {
+						const tr = document.createElement("tr");
+						tr.appendChild(celda(provider));
+						tr.appendChild(celda(fmtNum(info.requests)));
+						tr.appendChild(celda(fmtUsd(info.estimatedCostUsd)));
+						tbodyProveedor.appendChild(tr);
+					}
+				}
+			}
+
+			function filaCalificacion(nombre, counts) {
+				const total = (counts.like || 0) + (counts.neutral || 0) + (counts.bad || 0);
+				const tr = document.createElement("tr");
+				tr.appendChild(celda(nombre));
+
+				const tdBarra = document.createElement("td");
+				const barra = document.createElement("div");
+				barra.className = "barra";
+				if (total > 0) {
+					const partes = [
+						{ n: counts.like || 0, color: "var(--like)" },
+						{ n: counts.neutral || 0, color: "var(--neutral)" },
+						{ n: counts.bad || 0, color: "var(--bad)" },
+					];
+					for (const p of partes) {
+						if (p.n === 0) continue;
+						const span = document.createElement("span");
+						span.style.width = `${(p.n / total) * 100}%`;
+						span.style.background = p.color;
+						barra.appendChild(span);
+					}
+				}
+				tdBarra.appendChild(barra);
+				tr.appendChild(tdBarra);
+
+				tr.appendChild(celda(fmtNum(counts.like)));
+				tr.appendChild(celda(fmtNum(counts.neutral)));
+				tr.appendChild(celda(fmtNum(counts.bad)));
+				tr.appendChild(celda(fmtNum(total)));
+				return tr;
+			}
+
+			async function cargarFeedback() {
+				const tarjetas = document.getElementById("tarjetas-feedback");
+				const tbodyMarca = document.querySelector("#tabla-marca tbody");
+				const tbodyFuente = document.querySelector("#tabla-fuente tbody");
+				tarjetas.innerHTML = "";
+				tbodyMarca.innerHTML = "";
+				tbodyFuente.innerHTML = "";
+
+				let data;
+				try {
+					const qs = selectedBrand ? `?brand=${selectedBrand}` : "";
+					const res = await fetch(`/feedback-summary${qs}`);
+					data = await res.json();
+				} catch (err) {
+					tarjetas.innerHTML = `<div class="error">No se pudo cargar /feedback-summary: ${err}</div>`;
+					return;
+				}
+
+				let totalLike = 0,
+					totalNeutral = 0,
+					totalBad = 0;
+				for (const counts of Object.values(data.byBrand || {})) {
+					totalLike += counts.like || 0;
+					totalNeutral += counts.neutral || 0;
+					totalBad += counts.bad || 0;
+				}
+				const pct = (n) => (data.total > 0 ? Math.round((n / data.total) * 100) + "%" : "—");
+
+				const cards = [
+					{ valor: fmtNum(data.total), etiqueta: "Calificaciones totales" },
+					{ valor: pct(totalLike), etiqueta: "👍 Muy buenas" },
+					{ valor: pct(totalNeutral), etiqueta: "⚪ Necesitan trabajo" },
+					{ valor: pct(totalBad), etiqueta: "👎 No suficientemente buenas" },
+				];
+				for (const c of cards) {
+					const div = document.createElement("div");
+					div.className = "tarjeta";
+					div.innerHTML = `<div class="valor">${c.valor}</div><div class="etiqueta">${c.etiqueta}</div>`;
+					tarjetas.appendChild(div);
+				}
+
+				const brands = Object.entries(data.byBrand || {});
+				if (brands.length === 0) {
+					tbodyMarca.innerHTML =
+						'<tr><td colspan="6" class="vacio">Todavía no hay feedback registrado.</td></tr>';
+				} else {
+					for (const [brand, counts] of brands) {
+						tbodyMarca.appendChild(filaCalificacion(brand, counts));
+					}
+				}
+
+				const sources = Object.entries(data.bySource || {});
+				if (sources.length === 0) {
+					tbodyFuente.innerHTML =
+						'<tr><td colspan="6" class="vacio">Todavía no hay feedback registrado.</td></tr>';
+				} else {
+					for (const [source, counts] of sources) {
+						tbodyFuente.appendChild(filaCalificacion(source, counts));
+					}
+				}
+			}
+
+			document.getElementById("filtros-uso").addEventListener("click", (e) => {
+				const chip = e.target.closest(".chip");
+				if (!chip) return;
+				document
+					.querySelectorAll("#filtros-uso .chip")
+					.forEach((c) => c.classList.remove("activo"));
+				chip.classList.add("activo");
+				selectedDays = chip.dataset.days;
+				cargarUso();
+			});
+
+			document.getElementById("filtros-feedback").addEventListener("click", (e) => {
+				const chip = e.target.closest(".chip");
+				if (!chip) return;
+				document
+					.querySelectorAll("#filtros-feedback .chip")
+					.forEach((c) => c.classList.remove("activo"));
+				chip.classList.add("activo");
+				selectedBrand = chip.dataset.brand;
+				cargarFeedback();
+			});
+
+			cargarUso();
+			cargarFeedback();
+		</script>
+	</body>
+</html>
