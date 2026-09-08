@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +45,7 @@ if (!ANTHROPIC_API_KEY) {
 app.use((req, res, next) => {
 	res.header("Access-Control-Allow-Origin", "*"); // permite cualquier origen
 	res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-	res.header("Access-Control-Allow-Headers", "Content-Type");
+	res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 	if (req.method === "OPTIONS") {
 		return res.sendStatus(200); // responde al preflight
 	}
@@ -57,6 +58,251 @@ app.use((req, res, next) => {
 app.get("/health", (req, res) => {
 	res.json({ status: "ok", uptimeSeconds: Math.round(process.uptime()) });
 });
+
+// --- Login con Google, restringido a un dominio ---
+//
+// Objetivo: que solo gente con correo @benandfrank.com (o el dominio que se
+// configure) pueda usar el plugin, ya que en algún momento va a estar público
+// en la Community de Figma y cada uso gasta cuota de Claude/Gemini.
+//
+// Flujo (pensado para un plugin de Figma, que no puede recibir un redirect de
+// OAuth directamente porque vive en un iframe sandboxeado):
+//   1. El plugin pide un intento de login: GET /auth/google/start.
+//   2. El plugin abre la URL de Google que le regresamos en el navegador del
+//      sistema (window.open desde ui.html) y empieza a preguntar el estado
+//      con GET /auth/google/status?loginId=... cada pocos segundos.
+//   3. La persona inicia sesión con Google ahí, en su navegador normal.
+//   4. Google redirige a GET /auth/google/callback en este servidor, que
+//      valida el id_token, revisa que el correo sea del dominio permitido, y
+//      genera un token de sesión propio (no el de Google) para el plugin.
+//   5. La siguiente vez que el plugin pregunta el estado, ve "done" con su
+//      token y lo guarda (figma.clientStorage) para mandarlo en cada llamada
+//      (header Authorization: Bearer <token>) mientras dure la sesión --  ver
+//      requireAuth() más abajo, que la valida en cada request a /ortografia,
+//      /reescribir, /generate y /feedback.
+//
+// Mientras GOOGLE_OAUTH_CLIENT_ID/SECRET no estén configurados (ver
+// .env.example y el README), AUTH_ENABLED queda en false y el servidor sigue
+// funcionando exactamente como antes, sin pedir login a nadie -- así no se
+// rompe nada mientras se termina de configurar el proyecto de Google Cloud.
+const GOOGLE_OAUTH_CLIENT_ID = process.env.GOOGLE_OAUTH_CLIENT_ID || "";
+const GOOGLE_OAUTH_CLIENT_SECRET = process.env.GOOGLE_OAUTH_CLIENT_SECRET || "";
+const ALLOWED_EMAIL_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "benandfrank.com";
+// URL pública de este servidor (la que Google necesita para el redirect_uri
+// que se registra en Google Cloud Console). En Render es la misma siempre;
+// en local se puede sobreescribir con PUBLIC_SERVER_URL en .env si se quiere
+// probar el flujo completo apuntando a un túnel (ngrok, etc.) -- Google no
+// deja usar http://localhost como redirect_uri.
+const PUBLIC_SERVER_URL = process.env.PUBLIC_SERVER_URL || "https://topito-server.onrender.com";
+const GOOGLE_OAUTH_REDIRECT_URI = `${PUBLIC_SERVER_URL}/auth/google/callback`;
+const AUTH_ENABLED = Boolean(GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET);
+
+if (!AUTH_ENABLED) {
+	console.warn(
+		"[auth] GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET no configurados: " +
+			"el login con Google está DESACTIVADO y cualquiera con la URL puede usar " +
+			"el server. Ver README para configurarlo.",
+	);
+}
+
+// Sesiones activas (token propio -> { email, createdAt }). No expiran solas
+// -- la persona se queda con la sesión iniciada hasta que cierra sesión desde
+// el plugin (POST /auth/logout). Se guardan en disco para sobrevivir un
+// reinicio del server (Render puede reiniciar el proceso sin avisar).
+const SESSIONS_PATH = path.join(__dirname, "data", "sessions.json");
+
+function loadSessions() {
+	try {
+		return JSON.parse(fs.readFileSync(SESSIONS_PATH, "utf-8"));
+	} catch {
+		return {};
+	}
+}
+
+function saveSessions(sessions) {
+	fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2));
+}
+
+// Intentos de login en curso (loginId -> { status, token?, email?, reason?,
+// createdAt }). Viven solo en memoria: son de corta duración (minutos), así
+// que no hace falta que sobrevivan un reinicio del server -- si eso pasa a
+// mitad de un login, la persona simplemente lo vuelve a intentar.
+const pendingLogins = new Map();
+const PENDING_LOGIN_TTL_MS = 10 * 60 * 1000; // 10 minutos
+
+setInterval(
+	() => {
+		const now = Date.now();
+		for (const [loginId, entry] of pendingLogins) {
+			if (now - entry.createdAt > PENDING_LOGIN_TTL_MS) {
+				pendingLogins.delete(loginId);
+			}
+		}
+	},
+	5 * 60 * 1000,
+).unref();
+
+app.get("/auth/google/start", (req, res) => {
+	if (!AUTH_ENABLED) {
+		return res.status(501).json({
+			error: "El login con Google no está configurado en este servidor todavía.",
+		});
+	}
+	const loginId = crypto.randomUUID();
+	pendingLogins.set(loginId, { status: "pending", createdAt: Date.now() });
+
+	const params = new URLSearchParams({
+		client_id: GOOGLE_OAUTH_CLIENT_ID,
+		redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
+		response_type: "code",
+		scope: "openid email profile",
+		state: loginId,
+		// "hd" solo ayuda a que Google preseleccione/filtre el dominio en el
+		// selector de cuenta -- es una sugerencia de UX, no una garantía de
+		// seguridad, por eso el dominio se vuelve a validar de verdad abajo
+		// en /auth/google/callback con el id_token ya verificado por Google.
+		hd: ALLOWED_EMAIL_DOMAIN,
+		prompt: "select_account",
+	});
+	res.json({
+		loginId,
+		url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+	});
+});
+
+app.get("/auth/google/status", (req, res) => {
+	const loginId = req.query.loginId;
+	const entry = pendingLogins.get(loginId);
+	if (!entry) {
+		return res.json({ status: "expired" });
+	}
+	res.json(entry);
+	// Un token de sesión solo se debe poder recoger una vez desde aquí.
+	if (entry.status === "done" || entry.status === "denied") {
+		pendingLogins.delete(loginId);
+	}
+});
+
+function htmlAuthPage(title, message) {
+	return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8" />
+<title>${title}</title>
+<style>
+	body { font-family: -apple-system, Arial, sans-serif; background: #fafbef; color: #202020;
+		display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
+	.card { max-width: 380px; padding: 32px; }
+	h1 { font-size: 20px; margin: 0 0 12px; }
+	p { font-size: 15px; line-height: 1.5; color: #555; }
+</style></head>
+<body><div class="card"><h1>${title}</h1><p>${message}</p></div></body></html>`;
+}
+
+app.get("/auth/google/callback", async (req, res) => {
+	const { code, state, error: googleError } = req.query;
+	const loginId = state;
+	if (googleError) {
+		if (loginId) pendingLogins.set(loginId, { status: "denied", reason: "cancelado", createdAt: Date.now() });
+		return res
+			.status(200)
+			.send(htmlAuthPage("Inicio de sesión cancelado", "Puedes cerrar esta pestaña y volver a intentarlo desde el plugin."));
+	}
+	if (!code || !loginId || !pendingLogins.has(loginId)) {
+		return res
+			.status(400)
+			.send(htmlAuthPage("Enlace inválido o vencido", "Vuelve al plugin y dale \"Iniciar sesión con Google\" de nuevo."));
+	}
+
+	try {
+		const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams({
+				code,
+				client_id: GOOGLE_OAUTH_CLIENT_ID,
+				client_secret: GOOGLE_OAUTH_CLIENT_SECRET,
+				redirect_uri: GOOGLE_OAUTH_REDIRECT_URI,
+				grant_type: "authorization_code",
+			}),
+		});
+		const tokenData = await tokenRes.json();
+		if (!tokenRes.ok || !tokenData.id_token) {
+			throw new Error(tokenData.error_description || tokenData.error || "No se pudo obtener el id_token de Google.");
+		}
+
+		// Google ya firmó este id_token -- lo validamos contra su propio
+		// endpoint en vez de verificar la firma nosotros mismos, para no
+		// tener que manejar sus llaves públicas (JWKS) a mano.
+		const infoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${tokenData.id_token}`);
+		const info = await infoRes.json();
+		if (!infoRes.ok || info.aud !== GOOGLE_OAUTH_CLIENT_ID) {
+			throw new Error("id_token inválido.");
+		}
+
+		const email = info.email || "";
+		const domain = email.split("@")[1] || "";
+		if (info.email_verified !== "true" && info.email_verified !== true) {
+			throw new Error("Correo no verificado por Google.");
+		}
+		if (domain.toLowerCase() !== ALLOWED_EMAIL_DOMAIN.toLowerCase()) {
+			pendingLogins.set(loginId, { status: "denied", reason: "dominio", email, createdAt: Date.now() });
+			return res
+				.status(200)
+				.send(
+					htmlAuthPage(
+						"Acceso restringido",
+						`Este plugin es solo para correos @${ALLOWED_EMAIL_DOMAIN}. Iniciaste sesión como ${email}. Puedes cerrar esta pestaña.`,
+					),
+				);
+		}
+
+		const token = crypto.randomBytes(32).toString("hex");
+		const sessions = loadSessions();
+		sessions[token] = { email, createdAt: Date.now() };
+		saveSessions(sessions);
+
+		pendingLogins.set(loginId, { status: "done", token, email, createdAt: Date.now() });
+		res.status(200).send(htmlAuthPage("¡Listo!", `Iniciaste sesión como ${email}. Ya puedes volver a Figma.`));
+	} catch (err) {
+		console.error("[/auth/google/callback] Error:", err);
+		if (loginId) pendingLogins.set(loginId, { status: "denied", reason: "error", createdAt: Date.now() });
+		res
+			.status(200)
+			.send(htmlAuthPage("Algo salió mal", "No se pudo completar el inicio de sesión. Vuelve al plugin e inténtalo de nuevo."));
+	}
+});
+
+app.post("/auth/logout", (req, res) => {
+	const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+	if (token) {
+		const sessions = loadSessions();
+		if (sessions[token]) {
+			delete sessions[token];
+			saveSessions(sessions);
+		}
+	}
+	res.json({ ok: true });
+});
+
+// Se llama al inicio de cada endpoint que gasta cuota de IA (o que registra
+// datos a nombre de alguien): valida el header "Authorization: Bearer
+// <token>" contra las sesiones activas. Mientras AUTH_ENABLED sea false (ver
+// arriba) deja pasar todo, para no romper nada mientras se configura Google
+// Cloud -- ver README.
+function requireAuth(req, res) {
+	if (!AUTH_ENABLED) return { email: null };
+	const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+	if (!token) {
+		res.status(401).json({ error: "auth_required", message: "Inicia sesión con tu correo de Ben & Frank para usar el plugin." });
+		return null;
+	}
+	const sessions = loadSessions();
+	const session = sessions[token];
+	if (!session) {
+		res.status(401).json({ error: "invalid_session", message: "Tu sesión ya no es válida. Inicia sesión de nuevo." });
+		return null;
+	}
+	return session;
+}
 
 // --- Marcas soportadas ---
 // Cada marca tiene su propio dataset de tono (data/<marca>/tuning.json) y su propio
@@ -473,6 +719,7 @@ function requirePrompt(req, res) {
 }
 
 app.post("/ortografia", async (req, res) => {
+	if (requireAuth(req, res) === null) return;
 	const prompt = requirePrompt(req, res);
 	if (prompt === null) return;
 	const brand = resolveBrand(req, res);
@@ -507,6 +754,7 @@ ${prompt}`;
 });
 
 app.post("/reescribir", async (req, res) => {
+	if (requireAuth(req, res) === null) return;
 	const prompt = requirePrompt(req, res);
 	if (prompt === null) return;
 	const brand = resolveBrand(req, res);
@@ -542,6 +790,7 @@ ${prompt}
 });
 
 app.post("/generate", async (req, res) => {
+	if (requireAuth(req, res) === null) return;
 	const prompt = requirePrompt(req, res);
 	if (prompt === null) return;
 	const brand = resolveBrand(req, res);
@@ -583,6 +832,7 @@ Dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato
 // "bad" cuando el usuario le da "intentar de nuevo" sin haber calificado ni
 // aplicado alguna de las opciones mostradas -- se asume que esas no sirvieron.
 app.post("/feedback", (req, res) => {
+	if (requireAuth(req, res) === null) return;
 	const { text, rating, source, original } = req.body ?? {};
 
 	if (typeof text !== "string" || text.trim().length === 0) {

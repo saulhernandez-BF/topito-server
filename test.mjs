@@ -1,9 +1,10 @@
 async function runTest() {
-	const res = await fetch("https://topito-server.onrender.com/generate", {
+	//const res = await fetch("https://topito-server.onrender.com/generate", {
+	const res = await fetch("http://localhost:3000/test", {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({
-			prompt: "Haz un copy para invitar a clientes a visitar la tienda",
+			prompt: "Revisa que opciones de lentes tenemos en tienda",
 		}),
 	});
 

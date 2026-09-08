@@ -26,3 +26,7 @@ feedback-log.jsonl
 # Estado de paginación de fetch-meta-ads.mjs -- contiene el META_ACCESS_TOKEN
 # embebido en la URL de "siguiente página", nunca se debe subir a git.
 .meta-ads-state.json
+
+# Sesiones activas del login con Google (contiene tokens de sesión, no se sube)
+data/sessions.json
+Claude outputs/
