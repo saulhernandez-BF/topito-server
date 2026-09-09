@@ -82,6 +82,9 @@ Ver `.env.example` para la lista completa con comentarios. Resumen:
 
 ### Login con Google
 
+- `GET /auth/google/enabled` — sin efectos secundarios, dice si el login está
+  activo (`{ enabled: true|false }`). El plugin lo consulta al abrir (antes
+  de tener sesión) para decidir si mostrar el gate de login de una vez.
 - `GET /auth/google/start` — arranca un intento de login, devuelve
   `{ loginId, url }`.
 - `GET /auth/google/status?loginId=...` — el plugin pregunta esto cada pocos

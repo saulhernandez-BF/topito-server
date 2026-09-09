@@ -170,6 +170,15 @@ app.get("/auth/google/start", (req, res) => {
 	});
 });
 
+// El plugin lo consulta al abrir (antes de tener sesión) para saber si debe
+// mostrar la pantalla de login de una vez o no -- así el gate aparece desde
+// el inicio cuando el login está activo, sin romper el modo "fail-open"
+// (plugin funcionando normal, sin pedir nada) mientras no esté configurado.
+// No tiene efectos secundarios ni requiere sesión.
+app.get("/auth/google/enabled", (req, res) => {
+	res.json({ enabled: AUTH_ENABLED });
+});
+
 app.get("/auth/google/status", (req, res) => {
 	const loginId = req.query.loginId;
 	const entry = pendingLogins.get(loginId);
