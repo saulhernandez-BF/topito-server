@@ -56,6 +56,12 @@ jobs:
             sleep "${WAIT_MIN}m"
           done
 
+      - name: Traer copys 👍 de Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: npm run sync-likes
+
       - name: Recalcular embeddings pendientes
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

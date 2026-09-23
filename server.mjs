@@ -5,6 +5,7 @@ import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { registerSlackRoutes } from "./slack.mjs";
+import { createStorage } from "./storage.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -498,6 +499,22 @@ for (const brandKey of Object.keys(BRANDS)) {
 	brandData[brandKey] = loadBrandData(brandKey);
 }
 
+// --- Persistencia (Supabase + Google Sheets, ver storage.mjs) ---
+// Render borra el disco en cada deploy: los 👍 guardados en Supabase se vuelven
+// a sumar aquí como ejemplos de tono (muestreo al azar) para no perderlos.
+const storage = createStorage({ fetchWithTimeout });
+storage.loadLikedCopies().then((rows) => {
+	let added = 0;
+	for (const { brand, text } of rows) {
+		const data = brandData[brand];
+		if (!data || !text || text.length > MAX_REFERENCE_TEXT_LENGTH) continue;
+		if (data.referenceData.some((item) => item.text === text)) continue;
+		data.referenceData.push({ url: null, source: "feedback-like", text });
+		added++;
+	}
+	if (rows.length) console.log(`[storage] ${added} copys 👍 de Supabase agregados como referencia de tono.`);
+});
+
 function resolveBrand(req, res) {
 	const brand = req.body?.brand || DEFAULT_BRAND;
 	if (!BRANDS[brand]) {
@@ -604,6 +621,7 @@ function logUsage({ endpoint, provider, model, inputTokens, outputTokens }) {
 	} catch (err) {
 		console.error("No se pudo escribir el log de uso:", err);
 	}
+	storage.logUsage(entry);
 }
 
 // --- Feedback del usuario sobre las opciones que genera la IA (ver /feedback) ---
@@ -611,7 +629,7 @@ function logUsage({ endpoint, provider, model, inputTokens, outputTokens }) {
 // (el usuario le dio "intentar de nuevo" sin calificarla, o navegó a otra opción).
 const FEEDBACK_LOG_PATH = path.join(__dirname, "feedback-log.jsonl");
 
-function logFeedback({ text, rating, source, brand, original }) {
+function logFeedback({ text, rating, source, brand, original, author, channel }) {
 	const entry = {
 		timestamp: new Date().toISOString(),
 		brand,
@@ -625,6 +643,7 @@ function logFeedback({ text, rating, source, brand, original }) {
 	} catch (err) {
 		console.error("No se pudo escribir el log de feedback:", err);
 	}
+	storage.logFeedback({ text, rating, source, brand, original, author, channel });
 }
 
 // Un "like" se guarda como nuevo ejemplo de tono para esa marca. No se usa de
@@ -787,7 +806,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema al texto que me pediste reescribir:
 
 ${referenceText}
-${formatGuidance}
+${formatGuidance}${storage.glossaryPrompt(brand)}
 Ahora, con base en ese estilo, reescribe el siguiente texto para que se ajuste a mi voz y tono, solo dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato de lista y limitate a solo poner las opciones no necesito nada antes ni despues de eso. el formato de lista siempre sera (* opcion1, * opcion2, * opcion3, * opcion4), no quiero que pongas ni un texto más:
 ${prompt}
 `;
@@ -829,7 +848,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema a lo que me pediste:
 
 ${referenceText}
-${formatGuidance}
+${formatGuidance}${storage.glossaryPrompt(brand)}
 Ahora, con base en ese estilo, responde a esta petición:
 ${prompt}
 
@@ -866,15 +885,16 @@ app.post("/generate", async (req, res) => {
 // "bad" cuando el usuario le da "intentar de nuevo" sin haber calificado ni
 // aplicado alguna de las opciones mostradas -- se asume que esas no sirvieron.
 // Guarda una calificación (log + tuning si es 👍). Usada por /feedback y por Slack.
-function saveFeedback({ text, rating, source, brand, original }) {
-	logFeedback({ text, rating, source: source || "desconocido", brand, original });
+function saveFeedback({ text, rating, source, brand, original, author, channel }) {
+	logFeedback({ text, rating, source: source || "desconocido", brand, original, author, channel });
 	if (rating === "like") {
 		addLikedTextToTuning(brand, text);
 	}
 }
 
 app.post("/feedback", (req, res) => {
-	if (requireAuth(req, res) === null) return;
+	const session = requireAuth(req, res);
+	if (session === null) return;
 	const { text, rating, source, original } = req.body ?? {};
 
 	if (typeof text !== "string" || text.trim().length === 0) {
@@ -887,7 +907,7 @@ app.post("/feedback", (req, res) => {
 	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
 
 	try {
-		saveFeedback({ text, rating, source, brand, original });
+		saveFeedback({ text, rating, source, brand, original, author: session.email, channel: "figma" });
 		res.json({ ok: true });
 	} catch (err) {
 		console.error("[/feedback] Error:", err);
@@ -915,9 +935,16 @@ app.get("/brands", (req, res) => {
 // Reporte de uso y costo estimado, para decidir si el gasto en IA es viable.
 // GET /usage  -> totales generales
 // GET /usage?days=7 -> solo los últimos N días
-function computeUsageSummary(days) {
+async function computeUsageSummary(days) {
 	let lines = [];
-	try {
+	const fromDb = await storage.loadUsage(days).catch((err) => {
+		console.error("[storage]", err.message);
+		return null;
+	});
+	if (fromDb) {
+		lines = fromDb;
+		days = 0; // ya viene filtrado por fecha
+	} else try {
 		lines = fs
 			.readFileSync(USAGE_LOG_PATH, "utf-8")
 			.split("\n")
@@ -967,17 +994,22 @@ function computeUsageSummary(days) {
 	return summary;
 }
 
-app.get("/usage", (req, res) => {
-	res.json(computeUsageSummary(req.query.days));
+app.get("/usage", async (req, res) => {
+	res.json(await computeUsageSummary(req.query.days));
 });
 
 // Reporte de las calificaciones que ha ido dejando el equipo sobre las opciones
 // generadas -- para ver, marca por marca, qué tanto está sirviendo la IA.
 // GET /feedback-summary  -> totales generales
 // GET /feedback-summary?brand=benandfrank -> solo esa marca
-function computeFeedbackSummary(brandFilter) {
+async function computeFeedbackSummary(brandFilter) {
 	let lines = [];
-	try {
+	const fromDb = await storage.loadFeedback(brandFilter).catch((err) => {
+		console.error("[storage]", err.message);
+		return null;
+	});
+	if (fromDb) lines = fromDb;
+	else try {
 		lines = fs
 			.readFileSync(FEEDBACK_LOG_PATH, "utf-8")
 			.split("\n")
@@ -1004,8 +1036,8 @@ function computeFeedbackSummary(brandFilter) {
 	return summary;
 }
 
-app.get("/feedback-summary", (req, res) => {
-	res.json(computeFeedbackSummary(req.query.brand));
+app.get("/feedback-summary", async (req, res) => {
+	res.json(await computeFeedbackSummary(req.query.brand));
 });
 
 // Mini-dashboard visual de /usage y /feedback-summary (para no tener que leer
@@ -1033,6 +1065,7 @@ registerSlackRoutes(app, {
 	saveFeedback,
 	computeUsageSummary,
 	computeFeedbackSummary,
+	storage,
 });
 
 const PORT = process.env.PORT || 3000;

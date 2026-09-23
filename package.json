@@ -5,7 +5,8 @@
     "test": "node test.mjs",
     "start": "node server.mjs",
     "build-embeddings": "node scripts/build-embeddings.mjs",
-    "fetch-meta-ads": "node scripts/fetch-meta-ads.mjs"
+    "fetch-meta-ads": "node scripts/fetch-meta-ads.mjs",
+    "sync-likes": "node scripts/sync-likes.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

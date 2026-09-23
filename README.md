@@ -219,6 +219,28 @@ límite por usuario (`SLACK_RATE_LIMIT`); opcional `SLACK_ALLOWED_TEAM_ID` y
 Nota: las preferencias de marca por usuario se guardan en
 `data/slack-prefs.json` (se pierden en un redeploy, igual que las sesiones).
 
+## Persistencia (Supabase + Google Sheets)
+
+Render borra el disco en cada deploy, así que los datos importantes viven fuera
+(ver `storage.mjs`, todo opcional y sin dependencias):
+
+- **Supabase** (plan gratis) es la fuente de verdad: `usage_log`, `feedback`,
+  `copy_bank` (los 👍), `slack_prefs` y `figma_inbox`. El esquema está en
+  `supabase-schema.sql` (RLS activo sin políticas: solo el server con la
+  `SUPABASE_SERVICE_KEY` puede leer/escribir). `/usage` y `/feedback-summary`
+  leen de aquí cuando está configurado. Al arrancar, los 👍 se vuelven a sumar
+  como ejemplos de tono, y el workflow semanal los pasa a `tuning.json`
+  (`npm run sync-likes`) para que tengan embedding.
+- **Google Sheet "Topito – Banco de copys y glosario"** vía Apps Script
+  (`apps-script/Code.gs`): espejo del banco de copys para Content y pestaña
+  **Glosario** (Marca | Tipo | Término | Nota) que Content edita. El server lo
+  relee cada 5 min, lo mete en los prompts de reescribir/crear, y en Slack marca
+  con ⚠️ las opciones que usen palabras prohibidas.
+
+Variables: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `TOPITO_SHEET_WEBHOOK_URL`,
+`TOPITO_SHEET_SECRET` (y en GitHub Actions: secrets `SUPABASE_URL` y
+`SUPABASE_SERVICE_KEY` para `sync-likes`).
+
 ## Marcas y formatos
 
 Marcas soportadas (`BRANDS` en `server.mjs`): `benandfrank` (Ben & Frank,

@@ -54,6 +54,7 @@ export function registerSlackRoutes(app, deps) {
 		saveFeedback,
 		computeUsageSummary,
 		computeFeedbackSummary,
+		storage,
 	} = deps;
 
 	const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -145,10 +146,15 @@ export function registerSlackRoutes(app, deps) {
 	} catch {
 		prefs = {};
 	}
+	// Supabase es la fuente de verdad; el archivo local queda como respaldo.
+	storage?.loadSlackPrefs?.().then((fromDb) => {
+		if (fromDb) prefs = { ...prefs, ...fromDb };
+	});
 	const getBrand = (userId) => (BRANDS[prefs[userId]?.brand] ? prefs[userId].brand : DEFAULT_BRAND);
 	function setBrand(userId, brand) {
 		if (!BRANDS[brand] || prefs[userId]?.brand === brand) return;
 		prefs[userId] = { ...(prefs[userId] || {}), brand };
+		storage?.saveSlackPref?.(userId, brand);
 		try {
 			fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true });
 			fs.writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2));
@@ -195,6 +201,9 @@ export function registerSlackRoutes(app, deps) {
 	const getBotUserId = () => (botUserIdPromise ??= slack("auth.test").then((d) => d.user_id).catch(() => null));
 
 	// Solo gente del dominio permitido (misma regla que el login de Google del plugin).
+	const userEmails = new Map();
+	const getUserEmail = (userId) => userEmails.get(userId) || null;
+
 	async function isAllowedUser(userId) {
 		const cached = userAuthCache.get(userId);
 		if (cached !== undefined) return cached;
@@ -203,6 +212,7 @@ export function registerSlackRoutes(app, deps) {
 			const { user } = await slack("users.info", { user: userId });
 			const email = (user?.profile?.email || "").toLowerCase();
 			ok = !user?.is_bot && !user?.deleted && email.endsWith("@" + ALLOWED_EMAIL_DOMAIN.toLowerCase());
+			if (ok) userEmails.set(userId, email);
 		} catch (err) {
 			console.error("[slack] users.info falló:", err.details ?? err);
 		}
@@ -372,6 +382,13 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 				block_id: `opt_${i}`,
 				text: { type: "mrkdwn", text: `*Opción ${i + 1}*\n${esc(truncate(opt, 2800))}` },
 			});
+			const banned = storage?.glossaryViolations?.(brand, opt) || [];
+			if (banned.length) {
+				blocks.push({
+					type: "context",
+					elements: [{ type: "mrkdwn", text: `⚠️ Usa palabras prohibidas del glosario: ${banned.map((w) => `“${esc(w)}”`).join(", ")}` }],
+				});
+			}
 			const val = (rating) =>
 				JSON.stringify({ r: rating, b: brand, s: action === "reescribir" ? "reescribir" : "crear", t: truncate(opt, 1800) });
 			blocks.push({
@@ -413,9 +430,9 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 		return options.map((o, i) => `${i + 1}. ${o}`).join("\n") || "Sin opciones";
 	}
 
-	function usageBlocks(days) {
-		const u = computeUsageSummary(days);
-		const f = computeFeedbackSummary();
+	async function usageBlocks(days) {
+		const u = await computeUsageSummary(days);
+		const f = await computeFeedbackSummary();
 		const period = Number(days) > 0 ? `últimos ${days} días` : "histórico";
 		const endpoints = Object.entries(u.byEndpoint)
 			.sort((a, b) => b[1].requests - a[1].requests)
@@ -564,7 +581,7 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 				if (ADMIN_IDS.length && !ADMIN_IDS.includes(event.user)) {
 					return slack("chat.postMessage", { channel, thread_ts, text: "🔒 El reporte de uso solo está disponible para admins de Topito." });
 				}
-				return slack("chat.postMessage", { channel, thread_ts, text: "Reporte de uso de Topito", blocks: usageBlocks(route.days) });
+				return slack("chat.postMessage", { channel, thread_ts, text: "Reporte de uso de Topito", blocks: await usageBlocks(route.days) });
 			}
 			case "ayuda":
 				return slack("chat.postMessage", { channel, thread_ts, text: HELP_TEXT });
@@ -692,7 +709,7 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 			if (/^(like|neutral)_\d+$/.test(act.action_id)) {
 				const { r, b, s, t } = JSON.parse(act.value);
 				const idx = act.action_id.split("_")[1];
-				saveFeedback({ text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null });
+				saveFeedback({ text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
 				if (message?.blocks && payload.response_url) {
 					// Reemplazamos los botones de esa opción por la calificación.
 					const blocks = message.blocks.map((blk) =>
@@ -718,7 +735,7 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 						if (blk.type === "actions" && /^rate_\d+$/.test(blk.block_id || "")) {
 							try {
 								const { b: ob, s, t } = JSON.parse(blk.elements[0].value);
-								saveFeedback({ text: t, rating: "bad", source: s, brand: BRANDS[ob] ? ob : DEFAULT_BRAND, original: null });
+								saveFeedback({ text: t, rating: "bad", source: s, brand: BRANDS[ob] ? ob : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
 							} catch {}
 						}
 					}
