@@ -460,8 +460,21 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 			thread_ts,
 			text: "✍️ Topito está escribiendo…",
 		});
+		// Ojo: si "channel" es un ID de usuario (resultados por DM), Slack publica en
+		// el DM pero chat.update exige el ID real del canal (D...). Por eso usamos
+		// placeholder.channel. Si aun así falla la edición, publicamos un mensaje
+		// nuevo para que el placeholder nunca se quede "escribiendo…".
+		const realChannel = placeholder.channel || channel;
 		return {
-			update: (text, blocks) => slack("chat.update", { channel, ts: placeholder.ts, text, blocks: blocks || undefined }),
+			update: async (text, blocks) => {
+				try {
+					return await slack("chat.update", { channel: realChannel, ts: placeholder.ts, text, blocks: blocks || undefined });
+				} catch (err) {
+					console.error("[slack] chat.update falló, publico mensaje nuevo:", err.details ?? err);
+					slack("chat.delete", { channel: realChannel, ts: placeholder.ts }).catch(() => {});
+					return slack("chat.postMessage", { channel: realChannel, thread_ts, text, blocks: blocks || undefined });
+				}
+			},
 		};
 	}
 
