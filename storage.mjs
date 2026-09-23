@@ -64,7 +64,18 @@ export function createStorage({ fetchWithTimeout }) {
 	}
 
 	// Lee todas las filas (paginando de 1000 en 1000) con filtros PostgREST.
+	// Reintenta una vez: un proyecto nuevo de Supabase a veces responde
+	// "JWT issued at future" (desfase de reloj) en los primeros segundos.
 	async function selectAll(table, query = "") {
+		try {
+			return await selectAllOnce(table, query);
+		} catch (err) {
+			await new Promise((r) => setTimeout(r, 3000));
+			return selectAllOnce(table, query);
+		}
+	}
+
+	async function selectAllOnce(table, query = "") {
 		const out = [];
 		for (let offset = 0; offset < 100_000; offset += 1000) {
 			const page = await sb(`${table}?${query}${query ? "&" : ""}limit=1000&offset=${offset}`);
