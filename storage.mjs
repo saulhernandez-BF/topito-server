@@ -196,7 +196,7 @@ export function createStorage({ fetchWithTimeout }) {
 					{ onConflict: "brand,text_hash", ignoreDuplicates: true },
 				);
 				appendBankRow([
-					new Date().toISOString().slice(0, 16).replace("T", " "),
+					new Date().toLocaleString("sv-SE", { timeZone: "America/Mexico_City" }).slice(0, 16), // hora CDMX
 					brand,
 					source,
 					text,
