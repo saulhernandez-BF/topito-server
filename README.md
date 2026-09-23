@@ -176,6 +176,49 @@ contra el endpoint público `tokeninfo` de Google
 (`https://oauth2.googleapis.com/tokeninfo?id_token=...`), sin dependencias
 extra.
 
+## Bot de Slack (Topito)
+
+El mismo server expone un asistente de copy para Slack (`slack.mjs`) que usa
+**exactamente la misma lógica** que el plugin: ortografía, reescribir, crear,
+feedback 👍/⚪ (alimenta `data/<marca>/tuning.json`) y reporte de uso.
+
+**Cómo se usa**
+
+- Mencionándolo en un canal: `@Topito escribe 3 headlines para lentes de sol`.
+- Por DM, en lenguaje natural: "reescribe con nuestro tono: …", "revisa la
+  ortografía de: …", "reporte de uso de los últimos 7 días".
+- En el mismo hilo puede iterar: "más corto", "ahora para Bombavista".
+- Menú ⋯ de cualquier mensaje → **Reescribir con Topito** (abre un modal con
+  marca y formato) o **Revisar ortografía**. El resultado llega por DM.
+
+Un router barato (Claude Haiku con tool-use) interpreta cada mensaje y decide
+acción, marca, formato y texto; luego se llama a `ortografiaCore`,
+`reescribirCore` o `generateCore`. El costo del router se registra en
+`/usage` como `slack/router`.
+
+**Endpoints**: `POST /slack/events` (Events API) y `POST /slack/interactions`
+(botones, atajos, modal). Ambos verifican la firma de Slack.
+
+**Seguridad**: firma HMAC + anti-replay; solo usuarios con correo
+`@ALLOWED_EMAIL_DOMAIN`; se ignoran bots/ediciones/reintentos (sin bucles);
+límite por usuario (`SLACK_RATE_LIMIT`); opcional `SLACK_ALLOWED_TEAM_ID` y
+`SLACK_ADMIN_USER_IDS`.
+
+**Instalación**
+
+1. https://api.slack.com/apps → *Create New App* → *From a manifest* → pega
+   `slack-app-manifest.yml` y elige el workspace de Ben & Frank.
+2. *Install to Workspace*. Copia el **Bot User OAuth Token** (`xoxb-…`) y, en
+   *Basic Information*, el **Signing Secret**.
+3. En Render → Environment agrega `SLACK_BOT_TOKEN` y `SLACK_SIGNING_SECRET`
+   (y los opcionales). Render redepliega.
+4. En la app de Slack → *Event Subscriptions*, pulsa *Retry* en la Request URL
+   para que se verifique (el server ya debe estar arriba con las variables).
+5. Invita a `@Topito` a los canales donde lo quieras usar (`/invite @Topito`).
+
+Nota: las preferencias de marca por usuario se guardan en
+`data/slack-prefs.json` (se pierden en un redeploy, igual que las sesiones).
+
 ## Marcas y formatos
 
 Marcas soportadas (`BRANDS` en `server.mjs`): `benandfrank` (Ben & Frank,

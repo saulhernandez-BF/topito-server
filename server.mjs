@@ -4,11 +4,18 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
+import { registerSlackRoutes } from "./slack.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
-app.use(express.json());
+// Guardamos el body crudo (rawBody) porque Slack firma los requests con HMAC sobre
+// el body exacto -- ver slack.mjs > verifySlackSignature. No afecta al plugin.
+const keepRawBody = (req, res, buf) => {
+	req.rawBody = buf.toString("utf8");
+};
+app.use(express.json({ verify: keepRawBody }));
+app.use(express.urlencoded({ extended: true, verify: keepRawBody }));
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -727,15 +734,9 @@ function requirePrompt(req, res) {
 	return prompt;
 }
 
-app.post("/ortografia", async (req, res) => {
-	if (requireAuth(req, res) === null) return;
-	const prompt = requirePrompt(req, res);
-	if (prompt === null) return;
-	const brand = resolveBrand(req, res);
-	if (brand === null) return;
-
-	try {
-		const fullPrompt = `Eres un corrector ortográfico de textos en español para redes sociales y anuncios de ${BRANDS[brand].label}. El texto siempre debe tratar al lector de "tú", nunca de "vos" -- ninguna de nuestras marcas usa voseo.
+// Lógica de /ortografia separada del handler HTTP para reusarla desde el bot de Slack.
+async function ortografiaCore({ prompt, brand }) {
+	const fullPrompt = `Eres un corrector ortográfico de textos en español para redes sociales y anuncios de ${BRANDS[brand].label}. El texto siempre debe tratar al lector de "tú", nunca de "vos" -- ninguna de nuestras marcas usa voseo.
 
 Corrige estos errores:
 - Ortografía, tildes faltantes o de más, letras repetidas o cambiadas de lugar, y errores de tipeo. Revisa con cuidado las tildes obligatorias (cómo, estás, está, qué, más, así, etc.) -- es el error más común y el que más se pasa por alto.
@@ -747,20 +748,58 @@ Responde ÚNICAMENTE con el texto corregido, sin comillas ni explicación.
 
 Texto:
 ${prompt}`;
-		const { text: correctedText, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_ORTOGRAFIA, {
-			temperature: 0,
-		});
-		logUsage({
-			endpoint: "/ortografia",
-			provider: "claude",
-			model: CLAUDE_MODEL_ORTOGRAFIA,
-			...usage,
-		});
+	const { text: correctedText, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_ORTOGRAFIA, {
+		temperature: 0,
+	});
+	logUsage({
+		endpoint: "/ortografia",
+		provider: "claude",
+		model: CLAUDE_MODEL_ORTOGRAFIA,
+		...usage,
+	});
+	return correctedText;
+}
+
+app.post("/ortografia", async (req, res) => {
+	if (requireAuth(req, res) === null) return;
+	const prompt = requirePrompt(req, res);
+	if (prompt === null) return;
+	const brand = resolveBrand(req, res);
+	if (brand === null) return;
+
+	try {
+		const correctedText = await ortografiaCore({ prompt, brand });
 		res.json({ correctedText });
 	} catch (err) {
 		respondWithError(res, err, "/ortografia");
 	}
 });
+
+// Lógica de /reescribir separada del handler HTTP para reusarla desde el bot de Slack.
+async function reescribirCore({ prompt, brand, format }) {
+	const referenceText = await buildRelevantReference(prompt, "/reescribir", brand);
+	const formatGuidance = FORMATS[format].guidance
+		? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
+		: "";
+	const fullPrompt = `
+Eres un asistente que debe crear textos publicitarios (copy) respetando mi voz y tono.
+Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos por ser los más
+parecidos en tema al texto que me pediste reescribir:
+
+${referenceText}
+${formatGuidance}
+Ahora, con base en ese estilo, reescribe el siguiente texto para que se ajuste a mi voz y tono, solo dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato de lista y limitate a solo poner las opciones no necesito nada antes ni despues de eso. el formato de lista siempre sera (* opcion1, * opcion2, * opcion3, * opcion4), no quiero que pongas ni un texto más:
+${prompt}
+`;
+	const { text: correctedText, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_REESCRIBIR);
+	logUsage({
+		endpoint: "/reescribir",
+		provider: "claude",
+		model: CLAUDE_MODEL_REESCRIBIR,
+		...usage,
+	});
+	return correctedText;
+}
 
 app.post("/reescribir", async (req, res) => {
 	if (requireAuth(req, res) === null) return;
@@ -771,47 +810,20 @@ app.post("/reescribir", async (req, res) => {
 	const format = resolveFormat(req.body?.format);
 
 	try {
-		const referenceText = await buildRelevantReference(prompt, "/reescribir", brand);
-		const formatGuidance = FORMATS[format].guidance
-			? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
-			: "";
-		const fullPrompt = `
-Eres un asistente que debe crear textos publicitarios (copy) respetando mi voz y tono.
-Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos por ser los más
-parecidos en tema al texto que me pediste reescribir:
-
-${referenceText}
-${formatGuidance}
-Ahora, con base en ese estilo, reescribe el siguiente texto para que se ajuste a mi voz y tono, solo dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato de lista y limitate a solo poner las opciones no necesito nada antes ni despues de eso. el formato de lista siempre sera (* opcion1, * opcion2, * opcion3, * opcion4), no quiero que pongas ni un texto más:
-${prompt}
-`;
-		const { text: correctedText, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_REESCRIBIR);
-		logUsage({
-			endpoint: "/reescribir",
-			provider: "claude",
-			model: CLAUDE_MODEL_REESCRIBIR,
-			...usage,
-		});
+		const correctedText = await reescribirCore({ prompt, brand, format });
 		res.json({ correctedText });
 	} catch (err) {
 		respondWithError(res, err, "/reescribir");
 	}
 });
 
-app.post("/generate", async (req, res) => {
-	if (requireAuth(req, res) === null) return;
-	const prompt = requirePrompt(req, res);
-	if (prompt === null) return;
-	const brand = resolveBrand(req, res);
-	if (brand === null) return;
-	const format = resolveFormat(req.body?.format);
-
-	try {
-		const referenceText = await buildRelevantReference(prompt, "/generate", brand);
-		const formatGuidance = FORMATS[format].guidance
-			? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
-			: "";
-		const fullPrompt = `
+// Lógica de /generate separada del handler HTTP para reusarla desde el bot de Slack.
+async function generateCore({ prompt, brand, format }) {
+	const referenceText = await buildRelevantReference(prompt, "/generate", brand);
+	const formatGuidance = FORMATS[format].guidance
+		? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
+		: "";
+	const fullPrompt = `
 Eres un asistente que debe crear textos publicitarios (copy) respetando mi voz y tono.
 Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos por ser los más
 parecidos en tema a lo que me pediste:
@@ -823,13 +835,26 @@ ${prompt}
 
 Dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato de lista y limitate a solo poner las opciones no necesito nada antes ni despues de eso. el formato de lista siempre sera (* opcion1, * opcion2, * opcion3, * opcion4), no quiero que pongas ni un texto más. No uses markdown (nada de negritas ni encabezados), no agregues emojis a menos que el ejemplo de tono los use, y no termines preguntando si quiero algo más.
 `;
-		const { text, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_GENERATE);
-		logUsage({
-			endpoint: "/generate",
-			provider: "claude",
-			model: CLAUDE_MODEL_GENERATE,
-			...usage,
-		});
+	const { text, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_GENERATE);
+	logUsage({
+		endpoint: "/generate",
+		provider: "claude",
+		model: CLAUDE_MODEL_GENERATE,
+		...usage,
+	});
+	return text;
+}
+
+app.post("/generate", async (req, res) => {
+	if (requireAuth(req, res) === null) return;
+	const prompt = requirePrompt(req, res);
+	if (prompt === null) return;
+	const brand = resolveBrand(req, res);
+	if (brand === null) return;
+	const format = resolveFormat(req.body?.format);
+
+	try {
+		const text = await generateCore({ prompt, brand, format });
 		res.json({ text });
 	} catch (err) {
 		respondWithError(res, err, "/generate");
@@ -840,6 +865,14 @@ Dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato
 // (👍 muy buena, ⚪ buena pero necesita trabajo), o automáticamente con rating
 // "bad" cuando el usuario le da "intentar de nuevo" sin haber calificado ni
 // aplicado alguna de las opciones mostradas -- se asume que esas no sirvieron.
+// Guarda una calificación (log + tuning si es 👍). Usada por /feedback y por Slack.
+function saveFeedback({ text, rating, source, brand, original }) {
+	logFeedback({ text, rating, source: source || "desconocido", brand, original });
+	if (rating === "like") {
+		addLikedTextToTuning(brand, text);
+	}
+}
+
 app.post("/feedback", (req, res) => {
 	if (requireAuth(req, res) === null) return;
 	const { text, rating, source, original } = req.body ?? {};
@@ -854,10 +887,7 @@ app.post("/feedback", (req, res) => {
 	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
 
 	try {
-		logFeedback({ text, rating, source: source || "desconocido", brand, original });
-		if (rating === "like") {
-			addLikedTextToTuning(brand, text);
-		}
+		saveFeedback({ text, rating, source, brand, original });
 		res.json({ ok: true });
 	} catch (err) {
 		console.error("[/feedback] Error:", err);
@@ -885,7 +915,7 @@ app.get("/brands", (req, res) => {
 // Reporte de uso y costo estimado, para decidir si el gasto en IA es viable.
 // GET /usage  -> totales generales
 // GET /usage?days=7 -> solo los últimos N días
-app.get("/usage", (req, res) => {
+function computeUsageSummary(days) {
 	let lines = [];
 	try {
 		lines = fs
@@ -897,7 +927,7 @@ app.get("/usage", (req, res) => {
 		lines = []; // aún no hay llamadas registradas
 	}
 
-	const days = Number(req.query.days);
+	days = Number(days);
 	if (Number.isFinite(days) && days > 0) {
 		const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
 		lines = lines.filter((l) => new Date(l.timestamp).getTime() >= cutoff);
@@ -934,14 +964,18 @@ app.get("/usage", (req, res) => {
 		summary.byProvider[k].estimatedCostUsd = Number(summary.byProvider[k].estimatedCostUsd.toFixed(6));
 	}
 
-	res.json(summary);
+	return summary;
+}
+
+app.get("/usage", (req, res) => {
+	res.json(computeUsageSummary(req.query.days));
 });
 
 // Reporte de las calificaciones que ha ido dejando el equipo sobre las opciones
 // generadas -- para ver, marca por marca, qué tanto está sirviendo la IA.
 // GET /feedback-summary  -> totales generales
 // GET /feedback-summary?brand=benandfrank -> solo esa marca
-app.get("/feedback-summary", (req, res) => {
+function computeFeedbackSummary(brandFilter) {
 	let lines = [];
 	try {
 		lines = fs
@@ -953,8 +987,8 @@ app.get("/feedback-summary", (req, res) => {
 		lines = []; // aún no hay feedback registrado
 	}
 
-	if (req.query.brand) {
-		lines = lines.filter((l) => l.brand === req.query.brand);
+	if (brandFilter) {
+		lines = lines.filter((l) => l.brand === brandFilter);
 	}
 
 	const summary = { total: lines.length, byBrand: {}, bySource: {} };
@@ -967,7 +1001,11 @@ app.get("/feedback-summary", (req, res) => {
 		summary.bySource[l.source][l.rating] = (summary.bySource[l.source][l.rating] || 0) + 1;
 	}
 
-	res.json(summary);
+	return summary;
+}
+
+app.get("/feedback-summary", (req, res) => {
+	res.json(computeFeedbackSummary(req.query.brand));
 });
 
 // Mini-dashboard visual de /usage y /feedback-summary (para no tener que leer
@@ -975,6 +1013,26 @@ app.get("/feedback-summary", (req, res) => {
 // desde el navegador, así que no necesita nada extra del server.
 app.get("/dashboard", (req, res) => {
 	res.sendFile(path.join(__dirname, "public", "dashboard.html"));
+});
+
+// --- Bot de Slack (asistente de copy) ---
+// Se activa solo si SLACK_BOT_TOKEN y SLACK_SIGNING_SECRET están configurados;
+// si no, estas rutas responden 503 y el resto del server sigue igual.
+registerSlackRoutes(app, {
+	BRANDS,
+	DEFAULT_BRAND,
+	FORMATS,
+	ALLOWED_EMAIL_DOMAIN,
+	ANTHROPIC_API_KEY,
+	fetchWithTimeout,
+	parseJsonResponse,
+	logUsage,
+	ortografiaCore,
+	reescribirCore,
+	generateCore,
+	saveFeedback,
+	computeUsageSummary,
+	computeFeedbackSummary,
 });
 
 const PORT = process.env.PORT || 3000;

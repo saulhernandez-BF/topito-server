@@ -1,0 +1,47 @@
+# Manifest de la Slack App "Topito".
+# Uso: https://api.slack.com/apps → Create New App → From a manifest → pega esto.
+# Si pruebas en local con un túnel (ngrok, cloudflared), cambia las dos URLs.
+display_information:
+  name: Topito
+  description: Asistente de copy de Ben & Frank / Bombavista (crear, reescribir, ortografía).
+  background_color: "#1d1d1b"
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Topito
+    always_online: true
+  shortcuts:
+    - name: Reescribir con Topito
+      type: message
+      callback_id: topito_reescribir
+      description: Reescribe este mensaje con el tono de la marca
+    - name: Revisar ortografía
+      type: message
+      callback_id: topito_ortografia
+      description: Corrige ortografía y tildes de este mensaje
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read     # recibir @Topito en canales
+      - chat:write            # responder en hilos y DMs
+      - im:history            # recibir y leer DMs al bot (contexto del hilo)
+      - channels:history      # leer el hilo en canales públicos donde lo mencionan (contexto)
+      - groups:history        # igual, en canales privados donde esté invitado
+      - users:read            # users.info
+      - users:read.email      # validar dominio @benandfrank.com
+      - commands              # necesario para los atajos de mensaje
+settings:
+  event_subscriptions:
+    request_url: https://topito-server.onrender.com/slack/events
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: true
+    request_url: https://topito-server.onrender.com/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

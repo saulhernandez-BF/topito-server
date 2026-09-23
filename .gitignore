@@ -30,3 +30,4 @@ feedback-log.jsonl
 # Sesiones activas del login con Google (contiene tokens de sesión, no se sube)
 data/sessions.json
 Claude outputs/
+data/slack-prefs.json
