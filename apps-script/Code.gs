@@ -48,7 +48,9 @@ function configurarTopito() {
     secret = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
     props.setProperty('TOPITO_SECRET', secret);
   }
-  SpreadsheetApp.getUi().alert('Topito configurado ✅\n\nSecreto para Render (TOPITO_SHEET_SECRET):\n\n' + secret);
+  // Se muestra en el Registro de ejecución (getUi() no funciona al ejecutar desde el editor).
+  console.log('Topito configurado ✅  Secreto para Render (TOPITO_SHEET_SECRET): ' + secret);
+  try { SpreadsheetApp.getUi().alert('Topito configurado ✅\n\nSecreto para Render (TOPITO_SHEET_SECRET):\n\n' + secret); } catch (e) {}
 }
 
 function ensureTab_(ss, name, headers) {
