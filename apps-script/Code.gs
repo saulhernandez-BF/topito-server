@@ -93,6 +93,9 @@ function configurarTopito() {
 // Ejecuta esto una vez desde el editor si el menú dice que falta permiso para
 // UrlFetchApp: pide autorizar la conexión con topito-server y la prueba.
 function probarConexion() {
+  // Con el consentimiento granular de Google se puede autorizar solo una parte de
+  // los permisos; esto vuelve a pedir TODOS los de appsscript.json si falta alguno.
+  ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
   var url = (PropertiesService.getScriptProperties().getProperty('TOPITO_SERVER_URL') || DEFAULT_SERVER_URL) + '/health';
   var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
   console.log('topito-server respondió ' + res.getResponseCode() + ': ' + res.getContentText());
