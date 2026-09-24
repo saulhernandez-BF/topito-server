@@ -90,6 +90,14 @@ function configurarTopito() {
   try { SpreadsheetApp.getUi().alert('Topito configurado ✅\n\nSecreto para Render (TOPITO_SHEET_SECRET):\n\n' + secret); } catch (e) {}
 }
 
+// Ejecuta esto una vez desde el editor si el menú dice que falta permiso para
+// UrlFetchApp: pide autorizar la conexión con topito-server y la prueba.
+function probarConexion() {
+  var url = (PropertiesService.getScriptProperties().getProperty('TOPITO_SERVER_URL') || DEFAULT_SERVER_URL) + '/health';
+  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  console.log('topito-server respondió ' + res.getResponseCode() + ': ' + res.getContentText());
+}
+
 function ensureTab_(ss, name, headers) {
   var sh = ss.getSheetByName(name) || ss.insertSheet(name);
   sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
