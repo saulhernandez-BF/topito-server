@@ -1119,6 +1119,67 @@ app.get("/dashboard", (req, res) => {
 	res.sendFile(path.join(__dirname, "public", "dashboard.html"));
 });
 
+// --- Fase 3: bandeja "Mandar a Figma" (lo que alguien elige en Slack) ---
+// El plugin pregunta por los textos pendientes del correo con el que inició
+// sesión. Requiere el login con Google (sin sesión no hay a quién emparejar).
+app.get("/figma-inbox", async (req, res) => {
+	const session = requireAuth(req, res);
+	if (session === null) return;
+	if (!session.email) return res.json({ items: [] });
+	try {
+		res.json({ items: await storage.listFigmaInbox(session.email) });
+	} catch (err) {
+		console.error("[/figma-inbox]", err.message);
+		res.status(500).json({ error: "No se pudo leer la bandeja." });
+	}
+});
+
+app.post("/figma-inbox/consume", async (req, res) => {
+	const session = requireAuth(req, res);
+	if (session === null) return;
+	if (!session.email || !req.body?.id) return res.status(400).json({ error: "Falta id." });
+	try {
+		await storage.consumeFigmaInbox(session.email, req.body.id);
+		res.json({ ok: true });
+	} catch (err) {
+		console.error("[/figma-inbox/consume]", err.message);
+		res.status(500).json({ error: "No se pudo actualizar la bandeja." });
+	}
+});
+
+// --- Fase 3: endpoints servidor-a-servidor (menú de Google Sheets y cron) ---
+// Protegidos con el mismo secreto compartido del puente de Sheets
+// (TOPITO_SHEET_SECRET), en el header X-Topito-Secret.
+function requireInternalSecret(req, res) {
+	const secret = process.env.TOPITO_SHEET_SECRET;
+	const given = String(req.headers["x-topito-secret"] || "");
+	const ok =
+		secret && given.length === secret.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(secret));
+	if (!ok) res.status(401).json({ error: "unauthorized" });
+	return ok;
+}
+
+// Una fila de la pestaña "Lote" del Sheet de Topito → opciones de copy.
+app.post("/sheets/copy", async (req, res) => {
+	if (!requireInternalSecret(req, res)) return;
+	const { action = "crear", text, brand: rawBrand, format: rawFormat } = req.body ?? {};
+	if (typeof text !== "string" || !text.trim()) return res.status(400).json({ error: "Falta 'text'." });
+	const brand = BRANDS[rawBrand] ? rawBrand : DEFAULT_BRAND;
+	const format = resolveFormat(rawFormat);
+	try {
+		if (action === "ortografia") {
+			const corrected = await ortografiaCore({ prompt: text, brand });
+			return res.json({ options: [{ text: corrected, ok: true, fields: [] }] });
+		}
+		const result = action === "reescribir"
+			? await reescribirCore({ prompt: text, brand, format })
+			: await generateCore({ prompt: text, brand, format });
+		res.json({ options: result.options, references: result.references });
+	} catch (err) {
+		respondWithError(res, err, "/sheets/copy");
+	}
+});
+
 // --- Bot de Slack (asistente de copy) ---
 // Se activa solo si SLACK_BOT_TOKEN y SLACK_SIGNING_SECRET están configurados;
 // si no, estas rutas responden 503 y el resto del server sigue igual.
@@ -1138,6 +1199,14 @@ registerSlackRoutes(app, {
 	computeUsageSummary,
 	computeFeedbackSummary,
 	storage,
+	requireInternalSecret,
+	knowledgeStats: () =>
+		Object.fromEntries(
+			Object.keys(BRANDS).map((b) => [
+				b,
+				{ examples: brandData[b].referenceData.length, embeddings: brandData[b].referenceEmbeddings?.length || 0 },
+			]),
+		),
 });
 
 const PORT = process.env.PORT || 3000;

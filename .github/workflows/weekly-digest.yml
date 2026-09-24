@@ -1,0 +1,27 @@
+name: Resumen semanal de Topito en Slack
+
+# Cada lunes 9:00 hora CDMX (15:00 UTC) publica en #topito: peticiones y costo
+# de la semana, 👍 nuevos por marca, copys favoritos y tamaño de la base de
+# conocimiento. El server hace todo; aquí solo se le avisa (POST con secreto).
+on:
+  schedule:
+    - cron: "0 15 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Despertar el server (Render free puede estar dormido)
+        run: curl -s -m 90 -o /dev/null -w "%{http_code}\n" https://topito-server.onrender.com/health || true
+      - name: Publicar resumen
+        env:
+          TOPITO_SHEET_SECRET: ${{ secrets.TOPITO_SHEET_SECRET }}
+        run: |
+          code=$(curl -s -m 120 -o out.json -w "%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Topito-Secret: $TOPITO_SHEET_SECRET" \
+            https://topito-server.onrender.com/slack/digest)
+          cat out.json; echo
+          test "$code" = "200"

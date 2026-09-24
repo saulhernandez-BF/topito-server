@@ -55,6 +55,8 @@ export function registerSlackRoutes(app, deps) {
 		computeUsageSummary,
 		computeFeedbackSummary,
 		storage,
+		requireInternalSecret,
+		knowledgeStats,
 	} = deps;
 
 	const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -231,9 +233,9 @@ export function registerSlackRoutes(app, deps) {
 			properties: {
 				action: {
 					type: "string",
-					enum: ["crear", "reescribir", "ortografia", "reporte_uso", "ayuda", "responder"],
+					enum: ["crear", "reescribir", "ortografia", "lote", "reporte_uso", "ayuda", "responder"],
 					description:
-						"crear = generar copy nuevo desde una instrucción o brief (también para ajustar/iterar un copy anterior: 'más corto', 'con emoji'); reescribir = el usuario da un texto existente y quiere que se reescriba con el tono de la marca; ortografia = corregir solo ortografía/tildes de un texto; reporte_uso = costos/uso/calificaciones del servicio; ayuda = qué puede hacer Topito; responder = cualquier otra cosa (saludo, pregunta corta).",
+						"crear = generar copy nuevo desde una instrucción o brief (también para ajustar/iterar un copy anterior: 'más corto', 'con emoji'); reescribir = el usuario da un texto existente y quiere que se reescriba con el tono de la marca; ortografia = corregir solo ortografía/tildes de un texto; lote = el mensaje trae el contenido de un documento con una LISTA de copies ya escritos que hay que entonar/reescribir uno por uno (usa el campo items); reporte_uso = costos/uso/calificaciones del servicio; ayuda = qué puede hacer Topito; responder = cualquier otra cosa (saludo, pregunta corta).",
 				},
 				text: {
 					type: "string",
@@ -250,6 +252,11 @@ export function registerSlackRoutes(app, deps) {
 					enum: Object.keys(FORMATS),
 					description:
 						"Canal: headline = título/headline de anuncio de Meta; primario = texto primario/cuerpo de anuncio (Meta/IG ads); caption = post o caption de redes sociales (RRSS, IG); web = copy de sitio/landing; email = asunto y preheader de email/newsletter; google_ads = anuncio de Google/búsqueda (título + descripción); hook = gancho/primeros segundos de video TikTok/Reels; cta = texto de botón o llamado a la acción; general = no está claro.",
+				},
+				items: {
+					type: "array",
+					items: { type: "string" },
+					description: "Para lote: cada copy de la lista, tal cual aparece en el documento (máximo 10, sin encabezados ni notas).",
 				},
 				days: { type: "integer", description: "Para reporte_uso: días hacia atrás (opcional)." },
 				reply: {
@@ -268,7 +275,8 @@ export function registerSlackRoutes(app, deps) {
 		const system = `Eres el router de "Topito", el asistente de copy del equipo de Ben & Frank / Bombavista en Slack.
 Topito puede: crear copy nuevo, reescribir un texto con el tono de marca, corregir ortografía y mostrar un reporte de uso/costos.
 Marcas: ${brandList}. Marca activa del usuario: ${currentBrand}.
-Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pide "mejorarlo", "pasarlo a nuestro tono" o similar, es reescribir. Si pide ideas, opciones, headlines, captions, etc., es crear. Si en el hilo ya hay opciones de Topito y el usuario pide un ajuste, usa crear e incluye el copy de referencia en "text".`;
+Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pide "mejorarlo", "pasarlo a nuestro tono" o similar, es reescribir. Si pide ideas, opciones, headlines, captions, etc., es crear. Si en el hilo ya hay opciones de Topito y el usuario pide un ajuste, usa crear e incluye el copy de referencia en "text".
+Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya escritos para entonar o revisar, usa lote con "items"; si pide revisar ortografía de la lista, usa ortografia con todo el texto; si es un brief (objetivo, producto, público, mensajes clave), usa crear y pon en "text" el brief resumido junto con lo que pidió el usuario.`;
 		const convo = history.length
 			? `Contexto del hilo (más antiguo primero):\n${history.join("\n")}\n\nMensaje nuevo del usuario:\n${message}`
 			: message;
@@ -282,7 +290,7 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 			},
 			body: JSON.stringify({
 				model: ROUTER_MODEL,
-				max_tokens: 1024,
+				max_tokens: 2048,
 				temperature: 0,
 				system,
 				tools: [ROUTER_TOOL],
@@ -402,6 +410,12 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 				elements: [
 					{ type: "button", action_id: `like_${i}`, text: { type: "plain_text", text: "👍 Me encanta", emoji: true }, value: val("like") },
 					{ type: "button", action_id: `neutral_${i}`, text: { type: "plain_text", text: "⚪ Sirve con ajustes", emoji: true }, value: val("neutral") },
+					{
+						type: "button",
+						action_id: `figma_${i}`,
+						text: { type: "plain_text", text: "📤 A Figma", emoji: true },
+						value: JSON.stringify({ b: brand, f: format, t: truncate(opt.text, 1800) }),
+					},
 				],
 			});
 		});
@@ -477,7 +491,8 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 • _Revisa la ortografía de: …_
 • _Ahora hazlo para Bombavista_ / _más corto_ (en el mismo hilo)
 • _Reporte de uso de los últimos 7 días_
-También puedes usar el menú ⋯ de cualquier mensaje → *Reescribir con Topito* o *Revisar ortografía*.
+También puedes usar el menú ⋯ de cualquier mensaje → *Reescribir con Topito* o *Revisar ortografía*, o reaccionar con 🔤 (ortografía) o 🔁 (reescribir).
+Pega un link de Google Docs/Sheets con un brief o una lista de copies y los trabajo. Con *📤 A Figma* la opción llega a tu plugin.
 Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 
 	// ---------------------------------------------------------------------------
@@ -541,6 +556,183 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 	}
 
 	// ---------------------------------------------------------------------------
+	// Fase 3: lote (lista de copies de un Doc/Sheet), lectura de documentos,
+	// reacciones 🔤/🔁, modo asistente y resumen semanal
+	// ---------------------------------------------------------------------------
+	const DOC_URL_RE = /https:\/\/docs\.google\.com\/(?:document|spreadsheets)\/d\/[\w-]+[^\s|>]*/;
+	const MAX_LOTE = 10;
+
+	async function processLote({ userId, channel, thread_ts, items, brand, format }) {
+		const reply = await startReply({ channel, thread_ts });
+		const list = items.map((t) => String(t || "").trim()).filter(Boolean);
+		const truncatedNote = list.length > MAX_LOTE ? `\n_(Tomé los primeros ${MAX_LOTE} de ${list.length}.)_` : "";
+		const work = list.slice(0, MAX_LOTE);
+		if (!work.length) return reply.update("No encontré copies en el documento. ¿Me dices cuáles quieres entonar?");
+		if (!checkRateLimit(userId)) {
+			return reply.update(`🚦 Llegaste al límite de ${RATE_LIMIT} peticiones cada 10 minutos. Intenta en un rato.`);
+		}
+		try {
+			// De 3 en 3 para no saturar la API.
+			const results = [];
+			for (let i = 0; i < work.length; i += 3) {
+				const chunk = work.slice(i, i + 3);
+				results.push(...(await Promise.all(chunk.map((text) => reescribirCore({ prompt: text, brand, format }).catch(() => null)))));
+			}
+			const blocks = [
+				{
+					type: "context",
+					elements: [{ type: "mrkdwn", text: `🔁 Lote · ${brandLabel(brand)} · ${formatLabel(format)} · ${work.length} copies${truncatedNote}` }],
+				},
+			];
+			work.forEach((original, n) => {
+				blocks.push({ type: "divider" });
+				blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `*${n + 1}. Original:* ${esc(truncate(original, 280))}` }] });
+				const opts = results[n]?.options?.slice(0, 2) || [];
+				if (!opts.length) {
+					blocks.push({ type: "section", text: { type: "mrkdwn", text: "_No pude reescribir este, intenta de nuevo._" } });
+					return;
+				}
+				opts.forEach((opt, j) => {
+					const limits = limitsLine(opt);
+					blocks.push({
+						type: "section",
+						text: { type: "mrkdwn", text: `${esc(truncate(opt.text, 2600))}${limits ? `\n_${limits}_` : ""}` },
+						accessory: {
+							type: "button",
+							action_id: `like_l${n}x${j}`,
+							text: { type: "plain_text", text: "👍", emoji: true },
+							value: JSON.stringify({ r: "like", b: brand, s: "reescribir", t: truncate(opt.text, 1800) }),
+						},
+					});
+				});
+			});
+			const text = work.map((o, n) => `${n + 1}. ${results[n]?.options?.[0]?.text || "(sin resultado)"}`).join("\n");
+			await reply.update(text, blocks);
+		} catch (err) {
+			console.error("[slack] Error en lote:", err.details ?? err);
+			await reply.update(friendlyError(err));
+		}
+	}
+
+	// Si el mensaje trae un link de Google Docs/Sheets, agrega su contenido al
+	// mensaje para el router. La verificación de acceso la hace el Apps Script.
+	async function withDocContent(message, userId) {
+		const match = message.match(DOC_URL_RE);
+		if (!match || !storage?.readDoc) return { message };
+		try {
+			const doc = await storage.readDoc(match[0], getUserEmail(userId));
+			const content = truncate(String(doc.text || ""), 8000);
+			return {
+				message: `${message.replace(match[0], "(link al documento)")}\n\n[Contenido del documento "${doc.title || ""}"]\n${content}`,
+				docTitle: doc.title,
+			};
+		} catch (err) {
+			const denied = /sin acceso|no tienes acceso|denied/i.test(err.message);
+			return {
+				error: denied
+					? "🔒 No tienes acceso a ese documento (o no está compartido con Ben & Frank), así que no lo puedo leer."
+					: "😕 No pude abrir ese documento. Revisa que el link sea de Google Docs o Sheets y que esté compartido con Ben & Frank.",
+			};
+		}
+	}
+
+	async function fetchMessage(channel, ts) {
+		try {
+			const h = await slack("conversations.history", { channel, latest: ts, oldest: ts, inclusive: true, limit: 1 });
+			if (h.messages?.[0]?.ts === ts) return h.messages[0];
+		} catch {}
+		try {
+			const r = await slack("conversations.replies", { channel, ts, limit: 50 });
+			return (r.messages || []).find((m) => m.ts === ts) || null;
+		} catch {
+			return null;
+		}
+	}
+
+	// 🔤 (:abc:) = ortografía · 🔁 (:repeat:) = reescribir con el tono de la marca
+	const REACTION_ACTIONS = { abc: "ortografia", repeat: "reescribir" };
+
+	async function handleReaction(event) {
+		const action = REACTION_ACTIONS[event.reaction];
+		if (!action || event.item?.type !== "message") return;
+		const botUserId = await getBotUserId();
+		if (event.item_user === botUserId || event.user === botUserId) return;
+		const key = `reaction:${event.item.channel}:${event.item.ts}:${event.reaction}`;
+		if (seenEvents.get(key)) return;
+		seenEvents.set(key, true);
+		if (!(await isAllowedUser(event.user))) return;
+
+		const msg = await fetchMessage(event.item.channel, event.item.ts);
+		const text = (msg?.text || "").replace(/<@[A-Z0-9]+>/g, "").trim();
+		if (!msg || !text || msg.bot_id) return;
+		return processCopyRequest({
+			userId: event.user,
+			channel: event.item.channel,
+			thread_ts: msg.thread_ts || msg.ts,
+			action,
+			text,
+			brand: getBrand(event.user),
+			format: "general",
+		});
+	}
+
+	async function handleAssistantThreadStarted(event) {
+		const t = event.assistant_thread || {};
+		if (!t.channel_id || !t.thread_ts) return;
+		await slack("assistant.threads.setSuggestedPrompts", {
+			channel_id: t.channel_id,
+			thread_ts: t.thread_ts,
+			title: "¿Qué escribimos hoy?",
+			prompts: [
+				{ title: "Captions para redes", message: "Escribe captions para la nueva colección de lentes de sol" },
+				{ title: "Asunto de email", message: "Asunto y preheader para el email de la colección de otoño" },
+				{ title: "Google Ads", message: "4 títulos de Google Ads para armazones graduados" },
+				{ title: "Revisar ortografía", message: "Revisa la ortografía de: " },
+			],
+		}).catch((err) => console.error("[slack] setSuggestedPrompts:", err.details ?? err));
+	}
+
+	async function digestBlocks() {
+		const u = await computeUsageSummary(7);
+		const likes = (await storage?.loadRecentLikes?.(7, 50).catch(() => [])) || [];
+		const kb = knowledgeStats ? knowledgeStats() : {};
+		const likesBy = {};
+		for (const l of likes) likesBy[l.brand] = (likesBy[l.brand] || 0) + 1;
+		const top = likes.slice(0, 5).map((l) => `• _${esc(truncate(l.text.replace(/\s+/g, " "), 160))}_ — ${brandLabel(l.brand)}${l.author ? ` · ${esc(l.author.split("@")[0])}` : ""}`);
+		const kbLine = Object.entries(kb)
+			.map(([b, v]) => `• ${brandLabel(b)}: ${v.examples.toLocaleString("es-MX")} ejemplos (${v.embeddings.toLocaleString("es-MX")} con búsqueda por parecido)`)
+			.join("\n");
+		return [
+			{ type: "header", text: { type: "plain_text", text: "📊 Topito — resumen de la semana" } },
+			{
+				type: "section",
+				fields: [
+					{ type: "mrkdwn", text: `*Peticiones*\n${u.requests}` },
+					{ type: "mrkdwn", text: `*Costo estimado*\n$${u.totalEstimatedCostUsd.toFixed(2)} USD` },
+					{ type: "mrkdwn", text: `*👍 nuevos*\n${Object.entries(likesBy).map(([b, n]) => `${brandLabel(b)}: ${n}`).join(" · ") || "0"}` },
+				],
+			},
+			{ type: "section", text: { type: "mrkdwn", text: `*Copys favoritos de la semana*\n${top.join("\n") || "_Aún no hay 👍 esta semana._"}` } },
+			...(kbLine ? [{ type: "section", text: { type: "mrkdwn", text: `*Base de conocimiento*\n${kbLine}` } }] : []),
+			{ type: "context", elements: [{ type: "mrkdwn", text: "Califica con 👍 las opciones que te gusten: así Topito aprende el tono del equipo." }] },
+		];
+	}
+
+	// Lo llama el workflow semanal de GitHub Actions (header X-Topito-Secret).
+	app.post("/slack/digest", async (req, res) => {
+		if (!requireInternalSecret(req, res)) return;
+		const channel = req.body?.channel || process.env.SLACK_DIGEST_CHANNEL;
+		if (!channel) return res.status(400).json({ error: "Falta SLACK_DIGEST_CHANNEL." });
+		try {
+			await slack("chat.postMessage", { channel, text: "Topito — resumen de la semana", blocks: await digestBlocks() });
+			res.json({ ok: true });
+		} catch (err) {
+			console.error("[slack] digest:", err.details ?? err);
+			res.status(500).json({ error: err.message });
+		}
+	});
+
+	// ---------------------------------------------------------------------------
 	// Eventos: menciones y DMs
 	// ---------------------------------------------------------------------------
 	async function handleMessageEvent(event) {
@@ -569,9 +761,11 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 		}
 
 		const history = event.thread_ts ? await getThreadHistory(channel, event.thread_ts, event.ts, botUserId) : [];
+		const doc = await withDocContent(message, event.user);
+		if (doc.error) return slack("chat.postMessage", { channel, thread_ts, text: doc.error });
 		let route;
 		try {
-			route = await routeRequest({ message, history, currentBrand: getBrand(event.user) });
+			route = await routeRequest({ message: doc.message, history, currentBrand: getBrand(event.user) });
 		} catch (err) {
 			console.error("[slack] Router falló:", err.details ?? err);
 			await slack("chat.postMessage", { channel, thread_ts, text: friendlyError(err) });
@@ -589,6 +783,8 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 				const text = (route.text || message).trim();
 				return processCopyRequest({ userId: event.user, channel, thread_ts, action: route.action, text, brand, format });
 			}
+			case "lote":
+				return processLote({ userId: event.user, channel, thread_ts, items: route.items || [], brand, format });
 			case "reporte_uso": {
 				if (ADMIN_IDS.length && !ADMIN_IDS.includes(event.user)) {
 					return slack("chat.postMessage", { channel, thread_ts, text: "🔒 El reporte de uso solo está disponible para admins de Topito." });
@@ -617,6 +813,14 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 		}
 
 		const event = body.event || {};
+		if (event.type === "reaction_added") {
+			handleReaction(event).catch((err) => console.error("[slack] Error en reacción:", err.details ?? err));
+			return;
+		}
+		if (event.type === "assistant_thread_started") {
+			handleAssistantThreadStarted(event).catch(() => {});
+			return;
+		}
 		const isMention = event.type === "app_mention";
 		const isDM = event.type === "message" && event.channel_type === "im";
 		if (isMention || isDM) {
@@ -718,21 +922,44 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 			const channel = payload.channel?.id || payload.container?.channel_id;
 			const message = payload.message;
 
-			if (/^(like|neutral)_\d+$/.test(act.action_id)) {
+			if (/^figma_\d+$/.test(act.action_id)) {
+				const { b, f, t } = JSON.parse(act.value);
+				const email = getUserEmail(userId);
+				let ok = false;
+				try {
+					ok = email ? await storage?.addFigmaInbox?.({ email, brand: BRANDS[b] ? b : DEFAULT_BRAND, format: f || "general", text: t }) : false;
+				} catch (err) {
+					console.error("[slack] addFigmaInbox:", err.message);
+				}
+				if (payload.response_url) {
+					await postToResponseUrl(payload.response_url, {
+						response_type: "ephemeral",
+						replace_original: false,
+						text: ok
+							? "📤 Listo: quedó en tu bandeja *Desde Slack* del plugin de Figma (abre Topito Writer con tu correo de Ben & Frank)."
+							: "😕 No pude mandarlo a Figma en este momento.",
+					});
+				}
+				return;
+			}
+
+			if (/^(like|neutral)_\w+$/.test(act.action_id)) {
 				const { r, b, s, t } = JSON.parse(act.value);
 				const idx = act.action_id.split("_")[1];
 				saveFeedback({ text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
 				if (message?.blocks && payload.response_url) {
 					// Reemplazamos los botones de esa opción por la calificación.
-					const blocks = message.blocks.map((blk) =>
-						blk.block_id === `rate_${idx}`
-							? {
-									type: "context",
-									block_id: `rated_${idx}`,
-									elements: [{ type: "mrkdwn", text: `${r === "like" ? "👍 Me encanta" : "⚪ Sirve con ajustes"} — <@${userId}>` }],
-								}
-							: blk,
-					);
+					const label = `${r === "like" ? "👍 Me encanta" : "⚪ Sirve con ajustes"} — <@${userId}>`;
+					const blocks = message.blocks.map((blk) => {
+						if (blk.block_id === `rate_${idx}`) {
+							return { type: "context", block_id: `rated_${idx}`, elements: [{ type: "mrkdwn", text: label }] };
+						}
+						if (blk.accessory?.action_id === act.action_id) {
+							const { accessory, ...rest } = blk;
+							return { ...rest, text: { ...blk.text, text: `${blk.text.text}\n${label}` } };
+						}
+						return blk;
+					});
 					return postToResponseUrl(payload.response_url, { replace_original: true, text: message.text, blocks });
 				}
 				return;

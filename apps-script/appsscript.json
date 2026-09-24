@@ -1,0 +1,17 @@
+{
+  "timeZone": "America/Mexico_City",
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/spreadsheets.currentonly",
+    "https://www.googleapis.com/auth/spreadsheets.readonly",
+    "https://www.googleapis.com/auth/documents.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/script.external_request",
+    "https://www.googleapis.com/auth/script.container.ui"
+  ],
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE_ANONYMOUS"
+  }
+}

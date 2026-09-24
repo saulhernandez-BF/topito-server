@@ -250,6 +250,28 @@ Variables: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `TOPITO_SHEET_WEBHOOK_URL`,
 `TOPITO_SHEET_SECRET` (y en GitHub Actions: secrets `SUPABASE_URL` y
 `SUPABASE_SERVICE_KEY` para `sync-likes`).
 
+## Fase 3 — flujos
+
+- **Reacciones:** reaccionar con 🔤 (`:abc:`) a cualquier mensaje corrige
+  ortografía; con 🔁 (`:repeat:`) lo reescribe con el tono de marca. Topito
+  responde en el hilo (scope `reactions:read`, evento `reaction_added`).
+- **Modo asistente nativo:** panel lateral de Slack con prompts sugeridos
+  (`assistant:write`, evento `assistant_thread_started`).
+- **Links de Google Docs/Sheets:** si el mensaje trae un link, el Apps Script lo
+  lee (solo si quien pregunta tiene acceso) y el router decide: lista de copies
+  → **lote** (hasta 10, 2 opciones c/u con 👍), brief → **crear**. Responde solo
+  en Slack; no modifica el documento.
+- **📤 A Figma:** botón en cada opción → tabla `figma_inbox` → el plugin lo
+  muestra en "📥 Desde Slack" (`GET /figma-inbox`, `POST /figma-inbox/consume`,
+  emparejado por el correo de la sesión).
+- **Lote en Google Sheets:** pestaña "Lote" del Sheet de Topito + menú
+  *Topito → Generar copy (filas seleccionadas)* → `POST /sheets/copy`.
+- **Resumen semanal:** `.github/workflows/weekly-digest.yml` (lunes 9:00 CDMX) →
+  `POST /slack/digest` → publica en `SLACK_DIGEST_CHANNEL`.
+
+`/sheets/copy` y `/slack/digest` son servidor-a-servidor: header
+`X-Topito-Secret` = `TOPITO_SHEET_SECRET` (también como secret de GitHub).
+
 ## Marcas y formatos
 
 Marcas soportadas (`BRANDS` en `server.mjs`): `benandfrank` (Ben & Frank,

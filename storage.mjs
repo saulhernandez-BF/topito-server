@@ -254,6 +254,42 @@ export function createStorage({ fetchWithTimeout }) {
 			insert("slack_prefs", [{ user_id: userId, brand, updated_at: new Date().toISOString() }], { onConflict: "user_id" });
 		},
 
+		// --- Fase 3: bandeja "Mandar a Figma" ---
+		addFigmaInbox({ email, brand, format, text }) {
+			if (!dbEnabled) return Promise.resolve(false);
+			return sb("figma_inbox", { method: "POST", body: [{ email, brand, format, text }], prefer: "return=minimal" }).then(() => true);
+		},
+		async listFigmaInbox(email) {
+			if (!dbEnabled) return [];
+			return sb(
+				`figma_inbox?select=id,created_at,brand,format,text&email=eq.${encodeURIComponent(email)}&consumed_at=is.null&order=id.desc&limit=30`,
+			);
+		},
+		async consumeFigmaInbox(email, id) {
+			if (!dbEnabled) return;
+			await sb(`figma_inbox?id=eq.${Number(id)}&email=eq.${encodeURIComponent(email)}`, {
+				method: "PATCH",
+				body: { consumed_at: new Date().toISOString() },
+				prefer: "return=minimal",
+			});
+		},
+
+		// --- Fase 3: resumen semanal ---
+		async loadRecentLikes(days = 7, limit = 8) {
+			if (!dbEnabled) return [];
+			const since = new Date(Date.now() - days * 864e5).toISOString();
+			return sb(`feedback?select=brand,text,author,channel,created_at&rating=eq.like&created_at=gte.${since}&order=id.desc&limit=${limit}`);
+		},
+
+		// --- Fase 3: leer un Google Doc/Sheet que alguien pega en Slack ---
+		// El Apps Script corre como Zul, así que ÉL valida que quien lo pide
+		// (requester, correo verificado por Slack) tenga acceso al archivo --
+		// si no, nadie podría leer por medio de Topito algo que no le compartieron.
+		async readDoc(url, requester) {
+			if (!sheetsEnabled) throw new Error("La lectura de Docs/Sheets no está configurada.");
+			return sheetCall("readDoc", { url, requester });
+		},
+
 		glossaryPrompt,
 		glossaryViolations,
 		refreshGlossary,

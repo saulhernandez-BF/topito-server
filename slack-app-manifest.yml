@@ -13,6 +13,9 @@ features:
   bot_user:
     display_name: Topito
     always_online: true
+  # Modo asistente nativo (panel lateral de Slack con prompts sugeridos).
+  assistant_view:
+    assistant_description: Tu asistente de copy para Ben & Frank y Bombavista — crea, reescribe y corrige textos con el tono de marca.
   shortcuts:
     - name: Reescribir con Topito
       type: message
@@ -33,12 +36,16 @@ oauth_config:
       - users:read            # users.info
       - users:read.email      # validar dominio @benandfrank.com
       - commands              # necesario para los atajos de mensaje
+      - reactions:read        # reaccionar con 🔤 / 🔁 a un mensaje dispara ortografía / reescribir
+      - assistant:write       # modo asistente (prompts sugeridos en el panel lateral)
 settings:
   event_subscriptions:
     request_url: https://topito-server.onrender.com/slack/events
     bot_events:
       - app_mention
       - message.im
+      - reaction_added
+      - assistant_thread_started
   interactivity:
     is_enabled: true
     request_url: https://topito-server.onrender.com/slack/interactions
