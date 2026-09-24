@@ -561,6 +561,22 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 		return { data: buf.toString("base64"), mediaType };
 	}
 
+	// Respaldo por palabras clave cuando el router no deja claro el formato.
+	const FORMAT_KEYWORDS = [
+		["email", /\b(e-?mail|correo|newsletter|asunto|preheader)\b/i],
+		["google_ads", /\bgoogle( ads)?\b|\bsem\b|b[uú]squeda/i],
+		["hook", /\b(hook|gancho|reels?|tiktok|video)\b/i],
+		["cta", /\b(cta|bot[oó]n|llamado a la acci[oó]n)\b/i],
+		["headline", /\b(headline|titular|t[ií]tulo)\b/i],
+		["primario", /\b(texto primario|anuncio|ads?|meta ads|pauta)\b/i],
+		["caption", /\b(caption|post|instagram|ig|facebook|fb|redes|rrss|historia|story)\b/i],
+		["web", /\b(web|landing|p[aá]gina|sitio)\b/i],
+	];
+	function formatFromKeywords(text) {
+		const hit = FORMAT_KEYWORDS.find(([key, re]) => FORMATS[key] && re.test(text || ""));
+		return hit ? hit[0] : null;
+	}
+
 	async function processImageRequest({ userId, channel, thread_ts, file, note, extra }) {
 		const reply = await startReply({ channel, thread_ts });
 		if (!checkRateLimit(userId)) {
@@ -571,12 +587,23 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			let brand = getBrand(userId);
 			let format = "general";
 			if (note) {
-				const route = await routeRequest({ message: note, history: [], currentBrand: brand }).catch(() => ({}));
+				// Se le avisa al router que viene una imagen: así interpreta el texto como petición de copy.
+				const route = await routeRequest({
+					message: `[El usuario adjuntó una imagen (pieza o referencia) y pide copy para acompañarla] ${note}`,
+					history: [],
+					currentBrand: brand,
+				}).catch((err) => {
+					console.error("[slack] Router (imagen) falló:", err.details ?? err);
+					return {};
+				});
 				if (route.brand && BRANDS[route.brand]) {
 					setBrand(userId, route.brand);
 					brand = route.brand;
 				}
-				if (FORMATS[route.format]) format = route.format;
+				if (FORMATS[route.format] && route.format !== "general") format = route.format;
+				else format = formatFromKeywords(note) || "general";
+			} else {
+				format = "caption"; // imagen sola: lo más común es el caption del post
 			}
 			const image = await downloadSlackImage(file);
 			const result = await imageCopyCore({ image, note, brand, format });
