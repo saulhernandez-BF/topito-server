@@ -27,7 +27,10 @@ const app = express();
 const keepRawBody = (req, res, buf) => {
 	req.rawBody = buf.toString("utf8");
 };
-app.use(express.json({ verify: keepRawBody }));
+// JSON normal (100 kb); solo la ruta de imagen acepta cuerpos grandes (base64).
+const jsonDefault = express.json({ verify: keepRawBody });
+const jsonLarge = express.json({ verify: keepRawBody, limit: "8mb" });
+app.use((req, res, next) => (req.path === "/internal/image-copy" ? jsonLarge : jsonDefault)(req, res, next));
 app.use(express.urlencoded({ extended: true, verify: keepRawBody }));
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
@@ -1035,6 +1038,65 @@ ${outputInstructions({ formatDef, angles })}
 }
 
 const reescribirCore = ({ prompt, brand, format }) => runCopy({ mode: "reescribir", prompt, brand, format });
+
+// --- Copy desde imagen (Slack) ---
+// 1) Claude con visión lee la imagen: ¿es una pieza de la marca casi final o una
+//    referencia (competencia/inspiración)?, qué textos trae y qué corregir en ellos.
+// 2) Con esa lectura se arma una petición normal de "crear" (runCopy), así hereda
+//    referencias ★, glosario, 👎, límites por formato y botones.
+const IMAGE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+async function imageCopyCore({ image, note = "", brand, format }) {
+	if (!IMAGE_MEDIA_TYPES.includes(image.mediaType)) throw new Error("Formato de imagen no soportado");
+	const brandName = BRANDS[brand].label;
+	const visionPrompt = `Eres el revisor de copy de ${brandName} (ópticas, México).
+Analiza la imagen adjunta.${note ? ` La persona escribió: "${note}".` : ""}
+${storage.glossaryPrompt(brand)}
+Responde ÚNICAMENTE con un JSON válido, sin markdown:
+{"tipo":"pieza"|"referencia","descripcion":"...","textos_en_imagen":["..."],"revision":[{"texto":"...","problema":"...","sugerencia":"..."}]}
+- "tipo": "pieza" si es un diseño/post/banner de ${brandName} (logo, estilo o producto de la marca) casi listo; "referencia" si es de otra marca (competencia o inspiración). Si la persona lo dice, hazle caso.
+- "descripcion": 2-3 frases concretas de lo que se ve y comunica (producto, colores, mensaje, promo, público).
+- "textos_en_imagen": los textos visibles, tal cual, en orden de lectura (vacío si no hay).
+- "revision": SOLO si tipo = "pieza": errores de ortografía, tildes, puntuación, palabras prohibidas del glosario o frases que no suenan a la marca. Vacío si todo está bien. No inventes problemas.`;
+	const { text: raw, usage } = await callClaude(
+		[
+			{ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } },
+			{ type: "text", text: visionPrompt },
+		],
+		CLAUDE_MODEL_GENERATE,
+		{ maxTokens: 1200 },
+	);
+	logUsage({ endpoint: "/slack:imagen", provider: "claude", model: CLAUDE_MODEL_GENERATE, ...usage });
+
+	let info = { tipo: "pieza", descripcion: "", textos_en_imagen: [], revision: [] };
+	try {
+		const clean = raw.replace(/```(?:json)?/gi, "");
+		info = { ...info, ...JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1)) };
+	} catch {
+		info.descripcion = raw.slice(0, 600);
+	}
+	const textos = (info.textos_en_imagen || []).filter(Boolean).slice(0, 12);
+	const prompt =
+		info.tipo === "referencia"
+			? `Adapta al tono de ${brandName} esta referencia (un anuncio de otra marca). Toma la idea, estructura o gancho, pero NO copies frases textuales ni menciones a la otra marca.
+Qué se ve: ${info.descripcion}
+${textos.length ? `Textos de la referencia: ${textos.map((t) => `"${t}"`).join(" / ")}` : ""}
+${note ? `Petición: ${note}` : ""}`
+			: `Escribe el copy que acompaña esta pieza de ${brandName} (caption/texto del anuncio). Complementa lo que ya dice la imagen; no repitas literal sus textos.
+Qué se ve: ${info.descripcion}
+${textos.length ? `Textos en la imagen: ${textos.map((t) => `"${t}"`).join(" / ")}` : ""}
+${note ? `Petición: ${note}` : ""}`;
+	const result = await runCopy({ mode: "crear", prompt: prompt.trim(), brand, format });
+	return {
+		...result,
+		prompt: prompt.trim(), // para "Otra tanda" sin volver a mandar la imagen
+		image: {
+			tipo: info.tipo === "referencia" ? "referencia" : "pieza",
+			descripcion: info.descripcion || "",
+			textos,
+			revision: (info.revision || []).filter((r) => r && r.texto).slice(0, 8),
+		},
+	};
+}
 const generateCore = ({ prompt, brand, format }) => runCopy({ mode: "crear", prompt, brand, format });
 
 
@@ -1280,6 +1342,25 @@ function requireInternalSecret(req, res) {
 	return ok;
 }
 
+// Copy desde imagen para integraciones internas (mismo motor que Slack).
+// Body: { image: <base64>, mediaType: "image/png", note?, brand?, format? }
+app.post("/internal/image-copy", async (req, res) => {
+	if (!requireInternalSecret(req, res)) return;
+	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
+	const format = FORMATS[req.body?.format] ? req.body.format : "general";
+	try {
+		const out = await imageCopyCore({
+			image: { data: String(req.body?.image || ""), mediaType: req.body?.mediaType || "image/png" },
+			note: String(req.body?.note || ""),
+			brand,
+			format,
+		});
+		res.json(out);
+	} catch (err) {
+		respondWithError(res, err, "/internal/image-copy");
+	}
+});
+
 // Una fila de la pestaña "Lote" del Sheet de Topito → opciones de copy.
 app.post("/sheets/copy", async (req, res) => {
 	if (!requireInternalSecret(req, res)) return;
@@ -1316,6 +1397,7 @@ registerSlackRoutes(app, {
 	ortografiaCore,
 	reescribirCore,
 	generateCore,
+	imageCopyCore,
 	saveFeedback,
 	computeUsageSummary,
 	computeFeedbackSummary,

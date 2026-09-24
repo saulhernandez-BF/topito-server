@@ -51,6 +51,7 @@ export function registerSlackRoutes(app, deps) {
 		ortografiaCore,
 		reescribirCore,
 		generateCore,
+		imageCopyCore,
 		saveFeedback,
 		computeUsageSummary,
 		computeFeedbackSummary,
@@ -368,13 +369,27 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 		return `📚 Inspirado en ${refs.count} ${kind} de ${brandLabel(brand)}${winners}${top}`;
 	}
 
-	function resultBlocks({ action, brand, format, options, references, corrected, original, prompt }) {
+	function resultBlocks({ action, brand, format, options, references, corrected, original, prompt, image }) {
 		const blocks = [];
 		const meta =
 			action === "ortografia"
 				? `${ACTION_LABELS.ortografia} · ${brandLabel(brand)}`
-				: `${ACTION_LABELS[action]} · ${brandLabel(brand)} · ${formatLabel(format)}`;
+				: `${image ? "🖼️ Desde imagen" : ACTION_LABELS[action]} · ${brandLabel(brand)} · ${formatLabel(format)}`;
 		blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: meta }] });
+		if (image) {
+			const kind = image.tipo === "referencia" ? "una *referencia* (otra marca) — la adapté a nuestro tono" : "una *pieza de la marca* — escribí el copy que la acompaña";
+			blocks.push({ type: "section", text: { type: "mrkdwn", text: `Leí la imagen como ${kind}.\n_${esc(truncate(image.descripcion, 400))}_` } });
+			if (image.tipo !== "referencia") {
+				const review = image.revision.length
+					? `*Revisión de los textos de la imagen*\n${image.revision
+							.map((r) => `• “${esc(truncate(r.texto, 120))}” — ${esc(r.problema || "")}${r.sugerencia ? ` → *${esc(truncate(r.sugerencia, 160))}*` : ""}`)
+							.join("\n")}`
+					: image.textos.length
+						? "✅ Los textos de la imagen se ven bien (ortografía, glosario y tono)."
+						: null;
+				if (review) blocks.push({ type: "section", text: { type: "mrkdwn", text: truncate(review, 2900) } });
+			}
+		}
 		const refLine = action !== "ortografia" ? referencesLine(brand, references) : null;
 		if (refLine) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: refLine }] });
 
@@ -496,7 +511,8 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 • _Reporte de uso de los últimos 7 días_
 También puedes usar el menú ⋯ de cualquier mensaje → *Reescribir con Topito* o *Revisar ortografía*, o reaccionar con 🔤 (ortografía) o 🔁 (reescribir).
 Pega un link de Google Docs/Sheets con un brief o una lista de copies y los trabajo. Con *📤 A Figma* la opción llega a tu plugin.
-Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
+Mándame una *imagen* (pieza casi final o referencia de otra marca) y te propongo el copy; si es nuestra, también reviso sus textos.
+Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.`;
 
 	// ---------------------------------------------------------------------------
 	// "Respondedor": publica un placeholder y luego lo reemplaza con el resultado
@@ -526,6 +542,63 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 	}
 
 	// Procesa una petición de copy (desde mención, DM, botón o modal) y responde.
+	// Descarga una imagen de Slack (requiere el scope files:read) y la regresa en base64.
+	// Si el original pesa mucho usa la miniatura de 1024 px (Claude acepta hasta ~5 MB).
+	const MAX_IMAGE_BYTES = 3_500_000;
+	async function downloadSlackImage(file) {
+		const url = file.size && file.size > MAX_IMAGE_BYTES ? file.thumb_1024 || file.thumb_720 : file.url_private_download || file.url_private;
+		if (!url) throw Object.assign(new Error("Sin URL de la imagen"), { userMessage: "No pude acceder a la imagen." });
+		const res = await fetchWithTimeout(url, { headers: { Authorization: `Bearer ${BOT_TOKEN}` } });
+		const type = (res.headers.get("content-type") || "").split(";")[0];
+		if (!res.ok || !type.startsWith("image/")) {
+			throw Object.assign(new Error(`Descarga de imagen falló (${res.status} ${type})`), {
+				userMessage: "No pude abrir la imagen. (¿Topito tiene el permiso *files:read*? Pídeselo a Zul.)",
+			});
+		}
+		const buf = Buffer.from(await res.arrayBuffer());
+		if (buf.length > 5_000_000) throw Object.assign(new Error("Imagen muy pesada"), { userMessage: "La imagen es muy pesada; mándala más ligera (menos de 5 MB)." });
+		const mediaType = type === "image/jpg" ? "image/jpeg" : type;
+		return { data: buf.toString("base64"), mediaType };
+	}
+
+	async function processImageRequest({ userId, channel, thread_ts, file, note, extra }) {
+		const reply = await startReply({ channel, thread_ts });
+		if (!checkRateLimit(userId)) {
+			return reply.update(`🚦 Llegaste al límite de ${RATE_LIMIT} peticiones cada 10 minutos. Intenta en un rato.`);
+		}
+		try {
+			// Si la persona escribió algo junto con la imagen, el router saca marca y formato.
+			let brand = getBrand(userId);
+			let format = "general";
+			if (note) {
+				const route = await routeRequest({ message: note, history: [], currentBrand: brand }).catch(() => ({}));
+				if (route.brand && BRANDS[route.brand]) {
+					setBrand(userId, route.brand);
+					brand = route.brand;
+				}
+				if (FORMATS[route.format]) format = route.format;
+			}
+			const image = await downloadSlackImage(file);
+			const result = await imageCopyCore({ image, note, brand, format });
+			const payload = {
+				action: "crear", // "Otra tanda" re-usa el prompt ya armado (sin volver a mandar la imagen)
+				brand,
+				format,
+				original: note,
+				prompt: result.prompt,
+				options: result.options,
+				references: result.references,
+				image: result.image,
+			};
+			const blocks = resultBlocks(payload);
+			if (extra > 0) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `Usé la primera imagen; mándame las otras ${extra} por separado si también las necesitas.` }] });
+			await reply.update(fallbackText(payload), blocks);
+		} catch (err) {
+			console.error("[slack] Error en processImageRequest:", err.details ?? err);
+			await reply.update(err.userMessage || friendlyError(err));
+		}
+	}
+
 	async function processCopyRequest({ userId, channel, thread_ts, action, text, brand, format }) {
 		const reply = await startReply({ channel, thread_ts });
 		if (!checkRateLimit(userId)) {
@@ -785,8 +858,9 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 	// ---------------------------------------------------------------------------
 	async function handleMessageEvent(event) {
 		const botUserId = await getBotUserId();
-		// Anti-bucles: nada de bots (incluido Topito), ediciones ni subtipos.
-		if (event.bot_id || event.subtype || !event.user || event.user === botUserId) return;
+		// Anti-bucles: nada de bots (incluido Topito), ediciones ni subtipos
+		// (salvo "file_share": alguien mandó una imagen para copy desde imagen).
+		if (event.bot_id || (event.subtype && event.subtype !== "file_share") || !event.user || event.user === botUserId) return;
 		const dedupeKey = `${event.channel}:${event.ts}`;
 		if (seenEvents.get(dedupeKey)) return; // una mención en DM puede llegar dos veces
 		seenEvents.set(dedupeKey, true);
@@ -802,6 +876,10 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 				text: `🔒 Topito solo está disponible para cuentas @${ALLOWED_EMAIL_DOMAIN}.`,
 			});
 			return;
+		}
+		const images = (event.files || []).filter((f) => /^image\/(png|jpe?g|webp|gif)$/.test(f.mimetype || ""));
+		if (images.length) {
+			return processImageRequest({ userId: event.user, channel, thread_ts, file: images[0], note: message, extra: images.length - 1 });
 		}
 		if (!message) {
 			await slack("chat.postMessage", { channel, thread_ts, text: HELP_TEXT });
@@ -865,6 +943,10 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 			handleReaction(event).catch((err) => console.error("[slack] Error en reacción:", err.details ?? err));
 			return;
 		}
+		if (event.type === "app_home_opened" && event.tab === "home") {
+			publishHome(event.user).catch((err) => console.error("[slack] Home:", err.details ?? err));
+			return;
+		}
 		if (event.type === "assistant_thread_started") {
 			handleAssistantThreadStarted(event).catch(() => {});
 			return;
@@ -879,16 +961,28 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 	// ---------------------------------------------------------------------------
 	// Interactividad: botones, atajos de mensaje y modal
 	// ---------------------------------------------------------------------------
-	function reescribirModal({ text, brand, meta }) {
+	const MODAL_COPY = {
+		reescribir: { title: "Reescribir con Topito", submit: "Reescribir", label: "Texto a reescribir", hint: null },
+		crear: {
+			title: "Crear copy",
+			submit: "Crear",
+			label: "¿Qué necesitas?",
+			hint: "Ej. 4 headlines para la colección de lentes de sol, tono divertido, mencionar 2x1",
+		},
+		ortografia: { title: "Revisar ortografía", submit: "Revisar", label: "Texto a revisar", hint: null },
+	};
+
+	function reescribirModal({ text, brand, meta, action = "reescribir" }) {
 		const option = (value, label) => ({ text: { type: "plain_text", text: label }, value });
 		const brandOptions = Object.entries(BRANDS).map(([k, v]) => option(k, v.label));
 		const formatOptions = Object.entries(FORMATS).map(([k, v]) => option(k, v.label));
+		const copy = MODAL_COPY[action] || MODAL_COPY.reescribir;
 		return {
 			type: "modal",
-			callback_id: "topito_reescribir_submit",
+			callback_id: action === "reescribir" ? "topito_reescribir_submit" : `topito_${action}_submit`,
 			private_metadata: JSON.stringify(meta),
-			title: { type: "plain_text", text: "Reescribir con Topito" },
-			submit: { type: "plain_text", text: "Reescribir" },
+			title: { type: "plain_text", text: copy.title },
+			submit: { type: "plain_text", text: copy.submit },
 			close: { type: "plain_text", text: "Cancelar" },
 			blocks: [
 				{
@@ -902,20 +996,123 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 						initial_option: brandOptions.find((o) => o.value === brand),
 					},
 				},
-				{
-					type: "input",
-					block_id: "format",
-					label: { type: "plain_text", text: "Formato / canal" },
-					element: { type: "static_select", action_id: "v", options: formatOptions, initial_option: formatOptions[0] },
-				},
+				...(action === "ortografia"
+					? []
+					: [
+							{
+								type: "input",
+								block_id: "format",
+								label: { type: "plain_text", text: "Formato / canal" },
+								element: { type: "static_select", action_id: "v", options: formatOptions, initial_option: formatOptions[0] },
+							},
+						]),
 				{
 					type: "input",
 					block_id: "text",
-					label: { type: "plain_text", text: "Texto a reescribir" },
-					element: { type: "plain_text_input", action_id: "v", multiline: true, initial_value: truncate(text, 2900) },
+					label: { type: "plain_text", text: copy.label },
+					element: {
+						type: "plain_text_input",
+						action_id: "v",
+						multiline: true,
+						...(text ? { initial_value: truncate(text, 2900) } : {}),
+						...(copy.hint ? { placeholder: { type: "plain_text", text: copy.hint } } : {}),
+					},
 				},
 			],
 		};
+	}
+
+	// ---------------------------------------------------------------------------
+	// Pestaña Home de Topito (App Home)
+	// ---------------------------------------------------------------------------
+	const GLOSSARY_SHEET_URL =
+		process.env.TOPITO_SHEET_URL || "https://docs.google.com/spreadsheets/d/1cf6e5hXJWoSoAdevm9U-8WrVYg-ZRxp8qVo3Ta9hLVg/edit";
+
+	async function homeView(userId) {
+		const brand = getBrand(userId);
+		const option = (value, label) => ({ text: { type: "plain_text", text: label }, value });
+		const brandOptions = Object.entries(BRANDS).map(([k, v]) => option(k, v.label));
+		const glossary = storage?.glossaryFor?.(brand) || [];
+		const forbidden = glossary.filter((g) => g.type === "prohibida").slice(0, 15);
+		const preferred = glossary.filter((g) => g.type === "preferida").slice(0, 15);
+		const likes = (await storage?.loadUserLikes?.(getUserEmail(userId), 5).catch(() => [])) || [];
+
+		const glossaryText =
+			[
+				forbidden.length ? `🚫 *Evitar:* ${forbidden.map((g) => `${esc(g.term)}${g.note ? ` → _${esc(g.note)}_` : ""}`).join(" · ")}` : null,
+				preferred.length ? `✅ *Así se escribe:* ${preferred.map((g) => esc(g.term)).join(" · ")}` : null,
+			]
+				.filter(Boolean)
+				.join("\n") || "_Aún no hay términos para esta marca._";
+
+		return {
+			type: "home",
+			blocks: [
+				{ type: "header", text: { type: "plain_text", text: "✍️ Topito — tu asistente de copy" } },
+				{
+					type: "section",
+					text: { type: "mrkdwn", text: "*Marca por defecto*\nLa uso cuando no me dices otra (también en DMs, reacciones y el menú ⋯)." },
+					accessory: {
+						type: "static_select",
+						action_id: "home_brand",
+						options: brandOptions,
+						initial_option: brandOptions.find((o) => o.value === brand),
+					},
+				},
+				{
+					type: "actions",
+					block_id: "home_actions",
+					elements: [
+						{ type: "button", action_id: "home_open_crear", style: "primary", text: { type: "plain_text", text: "✍️ Crear copy", emoji: true } },
+						{ type: "button", action_id: "home_open_reescribir", text: { type: "plain_text", text: "🔁 Reescribir", emoji: true } },
+						{ type: "button", action_id: "home_open_ortografia", text: { type: "plain_text", text: "🔤 Ortografía", emoji: true } },
+					],
+				},
+				{ type: "context", elements: [{ type: "mrkdwn", text: "Los resultados te llegan por DM, con botones para calificar, pedir otra tanda o mandar a Figma." }] },
+				{ type: "divider" },
+				{
+					type: "section",
+					text: { type: "mrkdwn", text: `*Glosario de ${brandLabel(brand)}*\n${glossaryText}` },
+					accessory: {
+						type: "button",
+						action_id: "home_glossary_link",
+						url: GLOSSARY_SHEET_URL,
+						text: { type: "plain_text", text: "Editar en Sheets", emoji: true },
+					},
+				},
+				{ type: "divider" },
+				{
+					type: "section",
+					text: {
+						type: "mrkdwn",
+						text: `*Tus últimos 👍*\n${
+							likes.map((l) => `• _${esc(truncate(l.text.replace(/\s+/g, " "), 150))}_ — ${brandLabel(l.brand)}`).join("\n") ||
+							"_Todavía no calificas opciones con 👍. Cada 👍 le enseña a Topito el tono del equipo._"
+						}`,
+					},
+				},
+				{ type: "divider" },
+				{
+					type: "section",
+					text: {
+						type: "mrkdwn",
+						text:
+							"*Atajos*\n• Mencióname en un canal o escríbeme por DM, en lenguaje normal.\n" +
+							"• Menú ⋯ de cualquier mensaje → *Reescribir con Topito* / *Revisar ortografía*.\n" +
+							"• Reacciona con 🔤 (ortografía) o 🔁 (reescribir) a un mensaje.\n" +
+							"• Pega un link de Google Docs/Sheets con un brief o lista de copies.\n" +
+							"• Mándame una imagen (pieza casi final o referencia de otra marca) y te propongo el copy.\n" +
+							"• En el hilo: _más corto_, _ahora para Bombavista_, _otro ángulo_.\n" +
+							"• ★ en las referencias = copys que mejor funcionaron en anuncios reales.",
+					},
+				},
+			],
+		};
+	}
+
+	async function publishHome(userId) {
+		if (!(await isAllowedUser(userId))) return;
+		await slack("views.publish", { user_id: userId, view: await homeView(userId) });
 	}
 
 	async function handleInteraction(payload) {
@@ -930,6 +1127,13 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 				});
 			}
 			const text = (payload.message?.text || "").trim();
+			const botUserId = await getBotUserId();
+			if (payload.message?.bot_id || payload.message?.user === botUserId) {
+				return postToResponseUrl(payload.response_url, {
+					response_type: "ephemeral",
+					text: "💡 Ese mensaje es de Topito. Para ajustar sus opciones respóndele en el hilo (ej. _más corto_, _otro ángulo_) o usa sus botones.",
+				});
+			}
 			if (!text) {
 				return postToResponseUrl(payload.response_url, { response_type: "ephemeral", text: "Ese mensaje no tiene texto que pueda procesar." });
 			}
@@ -961,6 +1165,16 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 			return processCopyRequest({ userId, channel: userId, action: "reescribir", text, brand, format });
 		}
 
+		if (payload.type === "view_submission" && ["topito_crear_submit", "topito_ortografia_submit"].includes(payload.view?.callback_id)) {
+			const v = payload.view.state.values;
+			const action = payload.view.callback_id === "topito_crear_submit" ? "crear" : "ortografia";
+			const brand = v.brand.v.selected_option?.value || getBrand(userId);
+			const format = v.format?.v.selected_option?.value || "general";
+			const text = v.text.v.value || "";
+			setBrand(userId, brand);
+			return processCopyRequest({ userId, channel: userId, action, text, brand, format });
+		}
+
 		// --- Botones ---
 		if (payload.type === "block_actions") {
 			const act = payload.actions?.[0];
@@ -969,6 +1183,20 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 			if (!(await isAllowedUser(userId))) return;
 			const channel = payload.channel?.id || payload.container?.channel_id;
 			const message = payload.message;
+
+			// --- Pestaña Home ---
+			if (act.action_id === "home_brand") {
+				setBrand(userId, act.selected_option?.value);
+				return publishHome(userId);
+			}
+			if (act.action_id === "home_glossary_link") return; // es un link, Slack solo avisa
+			const homeOpen = act.action_id.match(/^home_open_(crear|reescribir|ortografia)$/);
+			if (homeOpen) {
+				return slack("views.open", {
+					trigger_id: payload.trigger_id,
+					view: reescribirModal({ text: "", brand: getBrand(userId), meta: {}, action: homeOpen[1] }),
+				});
+			}
 
 			if (/^figma_\d+$/.test(act.action_id)) {
 				const { b, f, t } = JSON.parse(act.value);

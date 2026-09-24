@@ -286,6 +286,18 @@ export function createStorage({ fetchWithTimeout }) {
 			}
 		},
 
+		// Últimos 👍 de una persona (para la pestaña Home de Slack).
+		async loadUserLikes(email, limit = 5) {
+			if (!dbEnabled || !email) return [];
+			try {
+				return await sb(
+					`feedback?select=brand,text,created_at&rating=eq.like&author=eq.${encodeURIComponent(email)}&order=id.desc&limit=${limit}`,
+				);
+			} catch {
+				return [];
+			}
+		},
+
 		// --- Fase 3: resumen semanal ---
 		async loadRecentLikes(days = 7, limit = 8) {
 			if (!dbEnabled) return [];
@@ -304,6 +316,7 @@ export function createStorage({ fetchWithTimeout }) {
 
 		glossaryPrompt,
 		glossaryViolations,
+		glossaryFor,
 		refreshGlossary,
 		glossaryInfo: () => ({ terms: glossary.length, loadedAt: glossaryLoadedAt || null }),
 	};

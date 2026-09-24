@@ -272,6 +272,25 @@ Variables: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `TOPITO_SHEET_WEBHOOK_URL`,
 `/sheets/copy` y `/slack/digest` son servidor-a-servidor: header
 `X-Topito-Secret` = `TOPITO_SHEET_SECRET` (también como secret de GitHub).
 
+## Fase 4 — aprendizaje y más canales
+
+- **Base limpia** (`npm run clean-tuning`, diario): fuera páginas legales del sitio y duplicados
+  normalizados; las referencias saltan candidatos casi idénticos (`REFERENCE_MAX_SIMILARITY`, 0.93).
+- **👎 No va** en Slack: los últimos 6 por marca entran al prompt como "evitar" (los "bad"
+  automáticos de pedir otra tanda no cuentan).
+- **Desempeño real** (`npm run fetch-ad-performance`, diario): Insights de Meta por trimestre
+  (últimos 36 meses) → `data/<marca>/performance.json` con score 0..1 por texto (CTR de link
+  suavizado 70% + costo por compra 30% si hay ≥3 compras). El score suma al parecido
+  (`PERFORMANCE_WEIGHT`, 0.08); los top (≥0.8) van con ★ en el prompt. También detecta copys de
+  Topito publicados → `data/topito-published.json` → resumen semanal.
+- **Cuota de Gemini** (~1,000 embeddings/día, compartida): caché LRU de peticiones y pausa
+  automática hasta el reinicio; el workflow hace máx. 800/día (`EMBEDDINGS_MAX_PER_RUN`).
+- **Pestaña Home** en Slack: marca por defecto, botones Crear/Reescribir/Ortografía (modales),
+  glosario y tus últimos 👍. Requiere `home_tab_enabled` + evento `app_home_opened`.
+- **Copy desde imagen**: manda una imagen a Topito (DM o mención). Si es pieza de la marca,
+  revisa sus textos y escribe el copy que la acompaña; si es referencia de otra marca, la adapta
+  al tono. Requiere el scope `files:read`. Ruta interna: `POST /internal/image-copy` (X-Topito-Secret).
+
 ## Marcas y formatos
 
 Marcas soportadas (`BRANDS` en `server.mjs`): `benandfrank` (Ben & Frank,

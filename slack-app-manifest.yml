@@ -7,7 +7,7 @@ display_information:
   background_color: "#1d1d1b"
 features:
   app_home:
-    home_tab_enabled: false
+    home_tab_enabled: true      # pestaña Home: marca por defecto, glosario, atajos, tus 👍
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
@@ -38,6 +38,7 @@ oauth_config:
       - commands              # necesario para los atajos de mensaje
       - reactions:read        # reaccionar con 🔤 / 🔁 a un mensaje dispara ortografía / reescribir
       - assistant:write       # modo asistente (prompts sugeridos en el panel lateral)
+      - files:read            # copy desde imagen: descargar la imagen que le mandan a Topito
 settings:
   event_subscriptions:
     request_url: https://topito-server.onrender.com/slack/events
@@ -46,6 +47,7 @@ settings:
       - message.im
       - reaction_added
       - assistant_thread_started
+      - app_home_opened
   interactivity:
     is_enabled: true
     request_url: https://topito-server.onrender.com/slack/interactions
