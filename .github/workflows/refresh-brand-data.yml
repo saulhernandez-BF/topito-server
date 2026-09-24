@@ -71,6 +71,11 @@ jobs:
             echo "Esperando ${WAIT_MIN} min..."; sleep "${WAIT_MIN}m"
           done
 
+      - name: Guardar avance de Meta Ads
+        if: always()
+        run: |
+          bash scripts/commit-data.sh "chore: refresh brand data (Meta Ads) [automated]"
+
       - name: Traer copys 👍 de Supabase
         continue-on-error: true
         timeout-minutes: 5
@@ -106,15 +111,4 @@ jobs:
           echo "Antes: $(tr '\n' ' ' < before.txt)" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Después: $(tr '\n' ' ' < after.txt)" >> "$GITHUB_STEP_SUMMARY"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          # Por si acaso: nunca subir el archivo viejo con token.
-          rm -f data/*/.meta-ads-state.json
-          git add data/
-          if git diff --cached --quiet; then
-            echo "Sin cambios en data/, nada que subir."
-            exit 0
-          fi
-          git commit -m "chore: refresh brand data (Meta Ads + 👍 + embeddings) [automated]" -m "$(cat after.txt)"
-          git pull --rebase -X theirs origin main || true
-          git push
+          bash scripts/commit-data.sh "chore: refresh brand data (Meta Ads + 👍 + embeddings) [automated]"

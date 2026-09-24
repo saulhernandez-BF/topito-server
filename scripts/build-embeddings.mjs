@@ -154,7 +154,19 @@ async function processBrand(brand, startedAt) {
 async function main() {
 	const startedAt = Date.now();
 	let anyTimeout = false;
-	for (const brand of BRANDS) {
+	// Primero la marca con menor cobertura, para que ninguna se quede sin
+	// embeddings porque la otra se come todo el tiempo de la corrida.
+	const coverage = (brand) => {
+		try {
+			const total = JSON.parse(fs.readFileSync(path.join(ROOT, "data", brand, "tuning.json"), "utf-8")).length || 1;
+			const done = JSON.parse(fs.readFileSync(path.join(ROOT, "data", brand, "tuning-embeddings.json"), "utf-8")).items.length;
+			return done / total;
+		} catch {
+			return 0;
+		}
+	};
+	const ordered = [...BRANDS].sort((a, b) => coverage(a) - coverage(b));
+	for (const brand of ordered) {
 		const result = await processBrand(brand, startedAt);
 		if (result === "timeout") {
 			anyTimeout = true;
