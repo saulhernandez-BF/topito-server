@@ -732,6 +732,27 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 		}
 	});
 
+	// Aviso de fallas (lo llama el workflow diario de GitHub solo si algo salió mal).
+	// Publica en SLACK_DIGEST_CHANNEL y menciona a los admins para que llegue notificación.
+	app.post("/slack/alert", async (req, res) => {
+		if (!requireInternalSecret(req, res)) return;
+		const channel = process.env.SLACK_DIGEST_CHANNEL;
+		if (!channel) return res.status(400).json({ error: "Falta SLACK_DIGEST_CHANNEL." });
+		const text = String(req.body?.text || "Algo falló en un proceso automático de Topito.").slice(0, 2500);
+		const mentions = ADMIN_IDS.map((id) => `<@${id}>`).join(" ");
+		try {
+			await slack("chat.postMessage", {
+				channel,
+				text: `⚠️ ${mentions ? mentions + " " : ""}${text}`,
+				unfurl_links: false,
+			});
+			res.json({ ok: true });
+		} catch (err) {
+			console.error("[slack] alert:", err.details ?? err);
+			res.status(500).json({ error: err.message });
+		}
+	});
+
 	// ---------------------------------------------------------------------------
 	// Eventos: menciones y DMs
 	// ---------------------------------------------------------------------------

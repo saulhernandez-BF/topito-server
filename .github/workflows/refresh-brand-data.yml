@@ -47,6 +47,7 @@ jobs:
         run: node scripts/kb-stats.mjs | tee before.txt
 
       - name: Refrescar anuncios de Meta Ads
+        id: meta
         continue-on-error: true
         timeout-minutes: 80
         env:
@@ -70,6 +71,8 @@ jobs:
             if [ "$WAIT_MIN" -ge "$LEFT" ]; then echo "No alcanza el tiempo para esperar ${WAIT_MIN} min; se sigue mañana."; break; fi
             echo "Esperando ${WAIT_MIN} min..."; sleep "${WAIT_MIN}m"
           done
+          # Si la última invocación terminó en error, el paso queda en rojo (dispara el aviso a Slack).
+          [ "${STATUS:-0}" -eq 0 ] || { echo "::error::fetch-meta-ads terminó con error"; exit 1; }
 
       - name: Guardar avance de Meta Ads
         if: always()
@@ -77,6 +80,7 @@ jobs:
           bash scripts/commit-data.sh "chore: refresh brand data (Meta Ads) [automated]"
 
       - name: Traer copys 👍 de Supabase
+        id: likes
         continue-on-error: true
         timeout-minutes: 5
         env:
@@ -85,6 +89,7 @@ jobs:
         run: npm run sync-likes
 
       - name: Recalcular embeddings pendientes
+        id: embeddings
         continue-on-error: true
         timeout-minutes: 45
         env:
@@ -103,6 +108,7 @@ jobs:
             [ "$STATUS" -ne 0 ] && echo "Error (probablemente cuota de Gemini); se reintenta en 2 min."
             sleep 2m
           done
+          [ "${STATUS:-0}" -eq 0 ] || { echo "::error::build-embeddings terminó con error"; exit 1; }
 
       - name: Commit y push de lo que haya avanzado
         if: always()
@@ -113,3 +119,25 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Después: $(tr '\n' ' ' < after.txt)" >> "$GITHUB_STEP_SUMMARY"
           bash scripts/commit-data.sh "chore: refresh brand data (Meta Ads + 👍 + embeddings) [automated]"
+
+      # Aviso en Slack (#topito-writer) SOLO si algo salió mal. El server publica el
+      # mensaje; aquí solo se le manda el resumen (mismo secreto que el digest).
+      # Que se acabe la cuota diaria de Gemini NO cuenta como error.
+      - name: Avisar en Slack si algo falló
+        if: always() && (job.status == 'failure' || steps.meta.outcome == 'failure' || steps.likes.outcome == 'failure' || steps.embeddings.outcome == 'failure')
+        continue-on-error: true
+        env:
+          TOPITO_SHEET_SECRET: ${{ secrets.TOPITO_SHEET_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          META: ${{ steps.meta.outcome }}
+          LIKES: ${{ steps.likes.outcome }}
+          EMB: ${{ steps.embeddings.outcome }}
+          JOB: ${{ job.status }}
+        run: |
+          AFTER=$(tr '\n' ' ' < after.txt 2>/dev/null || echo "sin conteo")
+          TEXT=$(printf 'Falló la actualización diaria de la base de conocimiento.\nMeta Ads: %s · 👍: %s · Embeddings: %s · Guardado: %s\nBase actual: %s\nLog: %s' "$META" "$LIKES" "$EMB" "$JOB" "$AFTER" "$RUN_URL")
+          curl -s -m 90 -o /dev/null https://topito-server.onrender.com/health || true
+          jq -n --arg text "$TEXT" '{text: $text}' > alert.json
+          curl -s -m 60 -X POST -H "Content-Type: application/json" \
+            -H "X-Topito-Secret: $TOPITO_SHEET_SECRET" \
+            --data @alert.json https://topito-server.onrender.com/slack/alert
