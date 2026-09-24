@@ -99,6 +99,7 @@ jobs:
             OUTPUT=$(npm run build-embeddings 2>&1) && STATUS=0 || STATUS=$?
             echo "$OUTPUT" | tail -n 30
             if echo "$OUTPUT" | grep -q "^Listo\."; then echo "Embeddings al día."; break; fi
+            if echo "$OUTPUT" | grep -q "^Detenido por cuota del día"; then echo "Cuota de Gemini del día usada; sigue mañana."; break; fi
             [ "$STATUS" -ne 0 ] && echo "Error (probablemente cuota de Gemini); se reintenta en 2 min."
             sleep 2m
           done

@@ -18,6 +18,19 @@ const MAX_REFERENCE_TEXT_LENGTH = 400; // mismo criterio que en server.mjs: desc
 const BATCH_SIZE = 25; // el free tier limita requests/minuto; lotes chicos + pausa evitan el 429
 // Corto en local; el workflow de GitHub Actions lo sube con EMBEDDINGS_MAX_RUNTIME_MS.
 const MAX_RUNTIME_MS = Number(process.env.EMBEDDINGS_MAX_RUNTIME_MS) || 100_000;
+// El free tier de Gemini da ~1,000 embeddings AL DÍA por proyecto (se reinicia a
+// medianoche hora del Pacífico). El server usa la MISMA llave para cada petición
+// (embedQuery), así que la corrida diaria deja margen: si se come toda la cuota,
+// el bot cae a ejemplos al azar el resto del día.
+const MAX_PER_RUN = Number(process.env.EMBEDDINGS_MAX_PER_RUN) || 800;
+let embeddedThisRun = 0;
+
+// Error de cuota DIARIA: reintentar no sirve hasta mañana.
+class DailyQuotaError extends Error {}
+const isDailyQuota = (error) =>
+	(error?.details || []).some((d) =>
+		(d.violations || []).some((v) => /PerDay/i.test(v.quotaId || "")),
+	);
 
 const BRANDS = ["benandfrank", "bombavista"];
 
@@ -47,6 +60,9 @@ async function embedBatch(texts, attempt = 1) {
 	const data = await res.json();
 
 	if (data.error) {
+		if (data.error.code === 429 && isDailyQuota(data.error)) {
+			throw new DailyQuotaError("Cuota diaria de embeddings de Gemini agotada");
+		}
 		const isRateLimit = data.error.code === 429;
 		if (isRateLimit && attempt <= 6) {
 			const retryInfo = data.error.details?.find(
@@ -132,11 +148,31 @@ async function processBrand(brand, startedAt) {
 			return "timeout";
 		}
 
+		if (embeddedThisRun >= MAX_PER_RUN) {
+			console.log(
+				`\n[${brand}] Tope de ${MAX_PER_RUN} embeddings por corrida (se deja cuota diaria para el bot). ` +
+					`Progreso guardado: ${items.length}/${referenceData.length}. Sigue en la próxima corrida.`,
+			);
+			save(outputPath, items);
+			return "cap";
+		}
+
 		const chunk = pending.slice(i, i + BATCH_SIZE);
 		process.stdout.write(
 			`[${brand}]   lote ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(pending.length / BATCH_SIZE)} (${chunk.length} textos)...`,
 		);
-		const vectors = await embedBatch(chunk.map((item) => item.text));
+		let vectors;
+		try {
+			vectors = await embedBatch(chunk.map((item) => item.text));
+		} catch (err) {
+			if (err instanceof DailyQuotaError) {
+				console.log(`\n[${brand}] ${err.message}. Progreso guardado: ${items.length}/${referenceData.length}. Sigue mañana.`);
+				save(outputPath, items);
+				return "quota";
+			}
+			throw err;
+		}
+		embeddedThisRun += chunk.length;
 		chunk.forEach((item, idx) => {
 			items.push({ text: item.text, url: item.url, source: item.source, embedding: vectors[idx] });
 		});
@@ -168,6 +204,11 @@ async function main() {
 	const ordered = [...BRANDS].sort((a, b) => coverage(a) - coverage(b));
 	for (const brand of ordered) {
 		const result = await processBrand(brand, startedAt);
+		if (result === "quota" || result === "cap") {
+			// Marcador que lee el workflow para NO reintentar (no hay cuota hasta mañana).
+			console.log(`Detenido por cuota del día (${embeddedThisRun} embeddings nuevos en esta corrida). Sigue mañana.`);
+			return;
+		}
 		if (result === "timeout") {
 			anyTimeout = true;
 			break; // el resto de marcas se procesa en la siguiente corrida
