@@ -16,7 +16,8 @@ const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-
 const EMBEDDING_DIMENSIONS = 768;
 const MAX_REFERENCE_TEXT_LENGTH = 400; // mismo criterio que en server.mjs: descarta texto legal
 const BATCH_SIZE = 25; // el free tier limita requests/minuto; lotes chicos + pausa evitan el 429
-const MAX_RUNTIME_MS = 100_000; // se corta antes del timeout de la terminal y guarda lo que lleve
+// Corto en local; el workflow de GitHub Actions lo sube con EMBEDDINGS_MAX_RUNTIME_MS.
+const MAX_RUNTIME_MS = Number(process.env.EMBEDDINGS_MAX_RUNTIME_MS) || 100_000;
 
 const BRANDS = ["benandfrank", "bombavista"];
 

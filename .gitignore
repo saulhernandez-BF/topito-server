@@ -23,8 +23,10 @@ feedback-log.jsonl
 # para tener la selección de referencia por relevancia en producción. El workflow
 # semanal de GitHub Actions lo recalcula y lo comitea junto con tuning.json.)
 
-# Estado de paginación de fetch-meta-ads.mjs -- contiene el META_ACCESS_TOKEN
-# embebido en la URL de "siguiente página", nunca se debe subir a git.
+# Formato VIEJO del estado de paginación de fetch-meta-ads.mjs -- contiene el
+# META_ACCESS_TOKEN embebido, nunca se debe subir a git. El formato nuevo
+# (.meta-ads-progress.json) va sin token y SÍ se sube, para que GitHub Actions
+# retome el backfill donde se quedó.
 .meta-ads-state.json
 
 # Sesiones activas del login con Google (contiene tokens de sesión, no se sube)

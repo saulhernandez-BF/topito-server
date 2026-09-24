@@ -279,10 +279,14 @@ respaldo aleatorio).
 
 ## Automatizaciones (GitHub Actions)
 
-- `.github/workflows/refresh-brand-data.yml` — corre semanalmente (lunes
-  9:00 UTC) y también se puede disparar manual desde la pestaña Actions.
-  Ejecuta `fetch-meta-ads` + `build-embeddings` y sube los cambios a `main`
-  si hay alguno (Render despliega automáticamente desde ahí).
+- `.github/workflows/refresh-brand-data.yml` — corre **diario** (9:00 UTC) y
+  también se puede disparar manual desde la pestaña Actions. Ejecuta
+  `fetch-meta-ads` → `sync-likes` (👍 de Supabase) → `build-embeddings`, cada
+  uno con su propio presupuesto de tiempo, y **siempre** sube a `main` lo que
+  haya avanzado (Render despliega automáticamente). El progreso del backfill se
+  guarda en `data/<marca>/.meta-ads-progress.json` (sin token) para que cada
+  corrida siga donde se quedó la anterior. El resumen de cada corrida muestra
+  ejemplos/embeddings antes y después (`scripts/kb-stats.mjs`).
 - `.github/workflows/keep-alive.yml` — ping a `/health` cada 10 minutos para
   que Render (free tier) no duerma el server por inactividad. No gasta cuota
   de IA.

@@ -4,7 +4,7 @@
 //
 // Primera corrida (backfill completo): se puede correr varias veces seguidas --
 // cada cuenta tiene miles de anuncios, así que toma varias corridas; el progreso
-// de paginación se guarda en data/<marca>/.meta-ads-state.json y se retoma
+// de paginación se guarda en data/<marca>/.meta-ads-progress.json (sin token, se sube a git) y se retoma
 // automáticamente si se corta a la mitad (por timeout o por el límite de tasa de
 // Meta, ver ACCOUNT_THROTTLED más abajo).
 //
@@ -33,7 +33,10 @@ const BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 const MAX_REFERENCE_TEXT_LENGTH = 400;
 const FIELDS = "name,status,creative{body,title,object_story_spec,asset_feed_spec}";
 const PAGE_LIMIT = 25; // con limit=100 Meta pide "reduce the amount of data" por estos campos anidados
-const MAX_RUNTIME_MS = 95_000; // se corta antes del timeout de la terminal y guarda lo que lleve
+const MIN_PAGE_LIMIT = 5; // si Meta sigue pidiendo "reduce the amount of data", se baja hasta aquí
+// Tiempo máximo por corrida: corto en local (terminal), largo en GitHub Actions
+// (el workflow pone META_MAX_RUNTIME_MS). Al llegar al tope guarda y sale limpio.
+const MAX_RUNTIME_MS = Number(process.env.META_MAX_RUNTIME_MS) || 95_000;
 
 // act_<id> por marca, según la documentación que compartió Sam (Marketing Digital).
 const ACCOUNTS = {
@@ -84,6 +87,22 @@ async function fetchJson(url, attempt = 1) {
 			throw err;
 		}
 
+		// "Please reduce the amount of data you're asking for" (code 1): pedir páginas
+		// más chicas funciona mejor que solo esperar. Las URLs de "siguiente página"
+		// que regresa Meta heredan el nuevo limit, así que el resto de la corrida ya
+		// va con páginas chicas.
+		if (data.error.code === 1) {
+			const u = new URL(url);
+			const limit = Number(u.searchParams.get("limit")) || PAGE_LIMIT;
+			if (limit > MIN_PAGE_LIMIT) {
+				const smaller = Math.max(MIN_PAGE_LIMIT, Math.floor(limit / 2));
+				u.searchParams.set("limit", String(smaller));
+				console.log(`\n  Meta pidió menos datos por página: bajando limit ${limit} → ${smaller}...`);
+				await sleep(3000);
+				return fetchJson(u.toString(), attempt);
+			}
+		}
+
 		const retryable = [1, 4, 17, 32].includes(data.error.code);
 		if (retryable && attempt <= 5) {
 			const waitSeconds = 20 * attempt;
@@ -110,8 +129,29 @@ function extractTexts(ad) {
 	return texts;
 }
 
-function statePath(brand) {
+// Progreso del backfill. Se guarda SIN el access_token (se vuelve a poner al
+// usarlo), así se puede subir a git y GitHub Actions retoma donde se quedó la
+// corrida anterior en vez de empezar de cero cada vez.
+function progressPath(brand) {
+	return path.join(ROOT, "data", brand, ".meta-ads-progress.json");
+}
+// Formato viejo (con token embebido, ignorado por git). Solo se lee para migrar.
+function legacyStatePath(brand) {
 	return path.join(ROOT, "data", brand, ".meta-ads-state.json");
+}
+
+function stripToken(url) {
+	if (!url) return url;
+	const u = new URL(url);
+	u.searchParams.delete("access_token");
+	return u.toString();
+}
+
+function withToken(url) {
+	if (!url) return url;
+	const u = new URL(url);
+	u.searchParams.set("access_token", META_ACCESS_TOKEN);
+	return u.toString();
 }
 
 function donePath(brand) {
@@ -146,23 +186,37 @@ function markIncrementalRun(brand, doneInfo) {
 }
 
 function loadState(brand) {
-	try {
-		return JSON.parse(fs.readFileSync(statePath(brand), "utf-8"));
-	} catch {
-		return null;
+	for (const p of [progressPath(brand), legacyStatePath(brand)]) {
+		try {
+			const state = JSON.parse(fs.readFileSync(p, "utf-8"));
+			state.nextUrl = withToken(state.nextUrl);
+			return state;
+		} catch {
+			/* sigue con el siguiente */
+		}
 	}
+	return null;
 }
 
 function saveState(brand, state) {
 	fs.mkdirSync(path.join(ROOT, "data", brand), { recursive: true });
-	fs.writeFileSync(statePath(brand), JSON.stringify(state));
+	const safe = { ...state, nextUrl: stripToken(state.nextUrl), updatedAt: new Date().toISOString() };
+	fs.writeFileSync(progressPath(brand), JSON.stringify(safe, null, 2));
+	// Ya migrado: el archivo viejo (con token) sobra.
+	try {
+		fs.unlinkSync(legacyStatePath(brand));
+	} catch {
+		/* no existía */
+	}
 }
 
 function clearState(brand) {
-	try {
-		fs.unlinkSync(statePath(brand));
-	} catch {
-		/* no existía, no pasa nada */
+	for (const p of [progressPath(brand), legacyStatePath(brand)]) {
+		try {
+			fs.unlinkSync(p);
+		} catch {
+			/* no existía, no pasa nada */
+		}
 	}
 }
 

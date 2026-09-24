@@ -1,12 +1,21 @@
-name: Refrescar datos de marca (Meta Ads + embeddings)
+name: Refrescar datos de marca (Meta Ads + 👍 + embeddings)
 
-# Se corre solo (semanal) o manualmente desde la pestaña "Actions" de GitHub
-# ("Run workflow"). Actualiza data/<marca>/tuning.json con anuncios nuevos de
-# Meta y recalcula los embeddings pendientes, y si hay cambios los sube a main
-# -- Render despliega automáticamente desde ahí.
+# Amplía la base de conocimiento de Topito:
+#   1. Trae copys de anuncios de Meta Ads (backfill por partes y luego incremental).
+#   2. Trae los copys marcados 👍 (Supabase → tuning.json).
+#   3. Calcula los embeddings pendientes (para que entren a la búsqueda por parecido).
+#   4. Sube a main lo que haya avanzado -- SIEMPRE, aunque algún paso falle o se
+#      acabe el tiempo -- y Render despliega solo.
+#
+# Diseño para que NUNCA se pierda avance:
+#   - Cada paso tiene su propio presupuesto de tiempo y no tumba el job si falla.
+#   - El progreso del backfill (data/<marca>/.meta-ads-progress.json, sin token) se
+#     sube a git, así cada corrida continúa donde se quedó la anterior.
+#   - Corre diario: mientras falte backfill avanza cada día; ya al día, cada corrida
+#     solo pide lo nuevo y tarda un par de minutos. (Repo público: minutos gratis.)
 on:
   schedule:
-    - cron: "0 9 * * 1" # lunes 09:00 UTC (~03:00 hora CDMX)
+    - cron: "0 9 * * *" # diario 09:00 UTC (~03:00 hora CDMX)
   workflow_dispatch: {}
 
 permissions:
@@ -19,13 +28,13 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
           cache: "npm"
@@ -33,64 +42,79 @@ jobs:
       - name: Instalar dependencias
         run: npm ci
 
+      - name: Conteo inicial
+        id: before
+        run: node scripts/kb-stats.mjs | tee before.txt
+
       - name: Refrescar anuncios de Meta Ads
+        continue-on-error: true
+        timeout-minutes: 80
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_MAX_RUNTIME_MS: "600000" # 10 min por invocación; el loop repite hasta 70 min
         run: |
-          set -e
-          for i in $(seq 1 15); do
-            echo "=== fetch-meta-ads intento $i/15 ==="
+          DEADLINE=$(( $(date +%s) + 70*60 ))
+          i=0
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            i=$((i+1))
+            echo "=== fetch-meta-ads intento $i ==="
             OUTPUT=$(npm run fetch-meta-ads 2>&1) && STATUS=0 || STATUS=$?
-            echo "$OUTPUT"
-            if [ "$STATUS" -ne 0 ]; then
-              echo "fetch-meta-ads terminó con error, se aborta este paso."
-              exit "$STATUS"
+            echo "$OUTPUT" | tail -n 40
+            if echo "$OUTPUT" | grep -q "^Listo\."; then echo "Meta Ads al día."; break; fi
+            if [ "$STATUS" -ne 0 ]; then echo "Error en esta invocación; se reintenta en 2 min."; WAIT_MIN=2
+            else
+              WAIT_MIN=$(echo "$OUTPUT" | grep -oE "esperar ~[0-9]+ min" | grep -oE "[0-9]+" | tail -1)
+              WAIT_MIN=${WAIT_MIN:-1}
             fi
-            if echo "$OUTPUT" | grep -q "^Listo\."; then
-              echo "Meta Ads al día."
-              break
-            fi
-            WAIT_MIN=$(echo "$OUTPUT" | grep -oE "esperar ~[0-9]+ min" | grep -oE "[0-9]+" | tail -1)
-            WAIT_MIN=${WAIT_MIN:-2}
-            echo "Todavía falta al menos una marca -- esperando ${WAIT_MIN} min antes de reintentar..."
-            sleep "${WAIT_MIN}m"
+            LEFT=$(( (DEADLINE - $(date +%s)) / 60 ))
+            if [ "$WAIT_MIN" -ge "$LEFT" ]; then echo "No alcanza el tiempo para esperar ${WAIT_MIN} min; se sigue mañana."; break; fi
+            echo "Esperando ${WAIT_MIN} min..."; sleep "${WAIT_MIN}m"
           done
 
       - name: Traer copys 👍 de Supabase
+        continue-on-error: true
+        timeout-minutes: 5
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: npm run sync-likes
 
       - name: Recalcular embeddings pendientes
+        continue-on-error: true
+        timeout-minutes: 45
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          EMBEDDINGS_MAX_RUNTIME_MS: "900000" # 15 min por invocación
         run: |
-          set -e
-          for i in $(seq 1 10); do
-            echo "=== build-embeddings intento $i/10 ==="
+          DEADLINE=$(( $(date +%s) + 40*60 ))
+          i=0
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            i=$((i+1))
+            echo "=== build-embeddings intento $i ==="
             OUTPUT=$(npm run build-embeddings 2>&1) && STATUS=0 || STATUS=$?
-            echo "$OUTPUT"
-            if [ "$STATUS" -ne 0 ]; then
-              echo "build-embeddings terminó con error, se aborta este paso."
-              exit "$STATUS"
-            fi
-            if echo "$OUTPUT" | grep -q "^Listo\."; then
-              echo "Embeddings al día."
-              break
-            fi
-            echo "Todavía falta al menos una marca -- esperando 1 min antes de reintentar..."
-            sleep 1m
+            echo "$OUTPUT" | tail -n 30
+            if echo "$OUTPUT" | grep -q "^Listo\."; then echo "Embeddings al día."; break; fi
+            [ "$STATUS" -ne 0 ] && echo "Error (probablemente cuota de Gemini); se reintenta en 2 min."
+            sleep 2m
           done
 
-      - name: Commit y push si hay cambios
+      - name: Commit y push de lo que haya avanzado
+        if: always()
         run: |
+          node scripts/kb-stats.mjs | tee after.txt
+          echo "## Base de conocimiento de Topito" >> "$GITHUB_STEP_SUMMARY"
+          echo "Antes: $(tr '\n' ' ' < before.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Después: $(tr '\n' ' ' < after.txt)" >> "$GITHUB_STEP_SUMMARY"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- data/; then
+          # Por si acaso: nunca subir el archivo viejo con token.
+          rm -f data/*/.meta-ads-state.json
+          git add data/
+          if git diff --cached --quiet; then
             echo "Sin cambios en data/, nada que subir."
             exit 0
           fi
-          git add data/
-          git commit -m "chore: refresh brand data (Meta Ads + embeddings) [automated]"
+          git commit -m "chore: refresh brand data (Meta Ads + 👍 + embeddings) [automated]" -m "$(cat after.txt)"
+          git pull --rebase -X theirs origin main || true
           git push
