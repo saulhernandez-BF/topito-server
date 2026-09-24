@@ -885,8 +885,13 @@ ${outputInstructions({ formatDef, angles })}
 			);
 			logUsage({ endpoint: `${endpoint}:recorte`, provider: "claude", model, ...fixUsage });
 			const fixed = parseCopyResponse(fixedText, formatDef).map((o) => checkOption(o, formatDef));
+			const totalLen = (o) => o.fields.reduce((n, f) => n + f.length, 0);
 			failingIdx.forEach((optIdx, k) => {
-				if (fixed[k]) options[optIdx] = { ...fixed[k], angle: fixed[k].angle || options[optIdx].angle };
+				const candidate = fixed[k];
+				// Solo reemplaza si la versión recortada cumple o al menos quedó más corta.
+				if (candidate && (candidate.ok || totalLen(candidate) < totalLen(options[optIdx]))) {
+					options[optIdx] = { ...candidate, angle: candidate.angle || options[optIdx].angle };
+				}
 			});
 		} catch (err) {
 			console.error(`[${endpoint}] No se pudo recortar:`, err.details ?? err);
