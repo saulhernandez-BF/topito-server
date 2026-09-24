@@ -1,8 +1,8 @@
 {
-  "nextUrl": "https://graph.facebook.com/v26.0/act_10154078421154698/ads?fields=name%2Cstatus%2Ccreative%7Bbody%2Ctitle%2Cobject_story_spec%2Casset_feed_spec%7D&limit=25&after=QVFIVFBDNGszdkRUcjllc0tWdmZAVSGtWcG5aV1JNRWRWaFRuRmFyUVF5aU05d2RpY2Y3eGFsbU9NMzR2ZAlQwN0NSUDgZD",
+  "nextUrl": "https://graph.facebook.com/v26.0/act_10154078421154698/ads?fields=name%2Cstatus%2Ccreative%7Bbody%2Ctitle%2Cobject_story_spec%2Casset_feed_spec%7D&limit=25&after=QVFIVGY4aEFqMVRhbTZAkM0k1UjlwRkpiaWRpRU0ycVFDQzN0VzdmMWdUTjQtSVN2RndEa2ZAoYmp1blNrRHY3NU5jM3oZD",
   "extracted": [],
-  "page": 334,
-  "adsCount": 7925,
-  "updatedAt": "2026-09-24T00:15:39.461Z",
+  "page": 788,
+  "adsCount": 19175,
+  "updatedAt": "2026-09-24T04:58:47.390Z",
   "migratedFrom": "local 2026-09-03"
 }
