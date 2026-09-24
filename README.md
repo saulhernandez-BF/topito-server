@@ -76,9 +76,18 @@ Ver `.env.example` para la lista completa con comentarios. Resumen:
   `feedback-log.jsonl`; un `like` además se agrega como ejemplo de tono nuevo
   para esa marca (`data/<marca>/tuning.json`).
 
-`format` acepta: `general` (default), `headline`, `primario`, `caption`,
-`web` — cada uno ajusta el prompt para ese canal (ver `FORMATS` en
-`server.mjs`).
+`format` acepta: `general` (default), `headline` (≤40), `primario` (1ª línea
+≤125), `caption`, `web`, `email` (asunto ≤50 + preheader ≤90), `google_ads`
+(título ≤30 + descripción ≤90), `hook` (≤80) y `cta` (≤25) — ver `FORMATS` en
+`server.mjs`.
+
+Desde la Fase 2 el modelo responde en JSON (`copy-engine.mjs`): el server mide
+cada campo, y si una opción se pasa del límite pide **una** versión recortada
+solo de esas. `/reescribir` y `/generate` siguen devolviendo la lista `* opción`
+de siempre (`correctedText` / `text`) y además `options` (texto, ángulo, campos
+con conteo y `ok`) y `references` (cuántos ejemplos de tono se usaron y el más
+parecido). En **crear**, cada opción usa un ángulo distinto: precio, estilo,
+beneficio o urgencia.
 
 ### Login con Google
 

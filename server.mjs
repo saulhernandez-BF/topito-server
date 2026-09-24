@@ -6,6 +6,7 @@ import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { registerSlackRoutes } from "./slack.mjs";
 import { createStorage } from "./storage.mjs";
+import { ANGLES, outputInstructions, parseCopyResponse, checkOption, optionText, toLegacyList, shortenPrompt } from "./copy-engine.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -20,6 +21,7 @@ app.use(express.urlencoded({ extended: true, verify: keepRawBody }));
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ANTHROPIC_API_URL = (process.env.ANTHROPIC_API_URL || "https://api.anthropic.com").replace(/\/$/, "");
 
 // Gemini free-tier tiene un límite de ~20 peticiones/minuto por modelo que se nos
 // agotó fácil en pruebas, y flash-lite además se comía tildes reales (ej. "estás" ->
@@ -341,21 +343,55 @@ const FORMATS = {
 		label: "Headline de anuncio",
 		guidance:
 			"Este texto es el HEADLINE/título grande de un anuncio (Meta, Google, etc). Debe ser muy corto y directo: máximo 6-8 palabras, sin verbos de relleno ni conectores largos. Va solo, sin contexto alrededor, así que tiene que entenderse de un vistazo.",
+		fields: [{ key: "texto", label: "Headline", max: 40 }],
 	},
 	primario: {
 		label: "Texto primario de anuncio",
 		guidance:
 			"Este texto es el CUERPO/texto primario de un anuncio de Meta o Instagram. Las plataformas lo cortan con un botón 'ver más' alrededor de los 125 caracteres, así que el gancho principal tiene que ir en la primera línea. Puede tener 2-3 líneas cortas en total.",
+		fields: [{ key: "texto", label: "Texto", firstLineMax: 125 }],
 	},
 	caption: {
 		label: "Caption de redes sociales",
 		guidance:
 			"Este texto es un caption para Instagram u otra red social. Tono cercano y conversacional, como si le hablaras directo a un seguidor. Puede usar emojis y un hashtag al final si el ejemplo de tono los usa, y puede ser un poco más largo que un anuncio.",
+		fields: [{ key: "texto", label: "Caption", max: 2200 }],
 	},
 	web: {
 		label: "Copy de página web",
 		guidance:
 			"Este texto es para una página del sitio web (no un anuncio). Debe ser claro y enfocado en el beneficio para el cliente, sin la urgencia de un anuncio pagado. No tiene límite estricto de longitud, pero cada oración debe aportar algo -- nada de relleno.",
+	},
+	// --- Fase 2 ---
+	email: {
+		label: "Email (asunto + preheader)",
+		guidance:
+			"Es el ASUNTO y el PREHEADER de un email de marketing. El asunto tiene que dar ganas de abrir sin sonar a spam (nada de MAYÚSCULAS completas ni exceso de signos). El preheader complementa al asunto -- no lo repite -- y adelanta el beneficio.",
+		fields: [
+			{ key: "asunto", label: "Asunto", max: 50 },
+			{ key: "preheader", label: "Preheader", max: 90 },
+		],
+	},
+	google_ads: {
+		label: "Google Ads (responsivo)",
+		guidance:
+			"Es un anuncio responsivo de búsqueda de Google Ads: un TÍTULO muy corto y una DESCRIPCIÓN. Deben funcionar solos y en cualquier combinación, con la palabra clave del producto de forma natural. Sin signos de exclamación en el título.",
+		fields: [
+			{ key: "titulo", label: "Título", max: 30 },
+			{ key: "descripcion", label: "Descripción", max: 90 },
+		],
+	},
+	hook: {
+		label: "Hook de video (TikTok/Reels)",
+		guidance:
+			"Es el HOOK de los primeros 3 segundos de un video de TikTok/Reels: se dice en voz alta o va como texto en pantalla. Tiene que detener el scroll: pregunta, contraste o dato inesperado. Máximo ~12 palabras, lenguaje hablado.",
+		fields: [{ key: "texto", label: "Hook", max: 80 }],
+	},
+	cta: {
+		label: "CTA / botón",
+		guidance:
+			"Es el texto de un BOTÓN o llamado a la acción. Verbo en imperativo, 1 a 4 palabras, claro sobre lo que pasa al hacer clic.",
+		fields: [{ key: "texto", label: "CTA", max: 25 }],
 	},
 };
 const DEFAULT_FORMAT = "general";
@@ -531,6 +567,13 @@ function buildStyleReference(brand, sampleSize = 20) {
 	return sampleData.map((item) => item.text).join("\n\n");
 }
 
+// Igual que buildStyleReference pero con metadatos para mostrar "inspirado en…".
+function randomReference(brand) {
+	const text = buildStyleReference(brand);
+	const items = text ? text.split("\n\n").map((t) => ({ text: t, score: null })) : [];
+	return { text, method: "random", items };
+}
+
 // Embedding del texto de la petición (RETRIEVAL_QUERY), para compararlo contra los
 // embeddings de referencia (RETRIEVAL_DOCUMENT) y elegir los más relevantes.
 async function embedQuery(text) {
@@ -560,7 +603,7 @@ async function embedQuery(text) {
 async function buildRelevantReference(promptText, endpointForLog, brand) {
 	const { referenceEmbeddings } = brandData[brand];
 	if (!referenceEmbeddings || referenceEmbeddings.length === 0) {
-		return buildStyleReference(brand);
+		return randomReference(brand);
 	}
 
 	try {
@@ -578,10 +621,14 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 			.sort((a, b) => b.score - a.score)
 			.slice(0, REFERENCE_TOP_K);
 
-		return ranked.map((r) => r.item.text).join("\n\n");
+		return {
+			text: ranked.map((r) => r.item.text).join("\n\n"),
+			method: "embeddings",
+			items: ranked.map((r) => ({ text: r.item.text, score: r.score })),
+		};
 	} catch (err) {
 		console.error(`[${brand}] Fallback a muestreo al azar (falló la selección por relevancia):`, err);
-		return buildStyleReference(brand);
+		return randomReference(brand);
 	}
 }
 
@@ -703,8 +750,8 @@ async function callGemini(promptText, model, generationConfig) {
 
 // Llama a Claude (Anthropic Messages API) y devuelve { text, usage }. temperature
 // es opcional (0 para tareas mecánicas como ortografía, donde no queremos variación).
-async function callClaude(promptText, model, { temperature } = {}) {
-	const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+async function callClaude(promptText, model, { temperature, maxTokens = 1024 } = {}) {
+	const response = await fetchWithTimeout(`${ANTHROPIC_API_URL}/v1/messages`, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
@@ -713,7 +760,7 @@ async function callClaude(promptText, model, { temperature } = {}) {
 		},
 		body: JSON.stringify({
 			model,
-			max_tokens: 1024,
+			max_tokens: maxTokens,
 			// El razonamiento extendido no aporta nada para copy corto y casi duplica
 			// el costo de salida (se cobra como output tokens); lo desactivamos.
 			thinking: { type: "disabled" },
@@ -794,31 +841,79 @@ app.post("/ortografia", async (req, res) => {
 	}
 });
 
-// Lógica de /reescribir separada del handler HTTP para reusarla desde el bot de Slack.
-async function reescribirCore({ prompt, brand, format }) {
-	const referenceText = await buildRelevantReference(prompt, "/reescribir", brand);
-	const formatGuidance = FORMATS[format].guidance
-		? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
-		: "";
+// --- Motor de copy compartido por /reescribir, /generate y Slack ---
+// Pide la respuesta en JSON (ver copy-engine.mjs), mide cada campo contra el
+// límite del formato y, si alguna opción se pasa, pide UNA versión recortada
+// solo de esas. Devuelve { raw, options, references }:
+//   raw        -> lista "* opción" (compatibilidad con el plugin actual)
+//   options    -> [{ text, angle, angleLabel, fields:[{label,value,length,max,ok}], ok }]
+//   references -> { method, count, top } para mostrar "inspirado en…"
+async function runCopy({ mode, prompt, brand, format }) {
+	const endpoint = mode === "reescribir" ? "/reescribir" : "/generate";
+	const model = mode === "reescribir" ? CLAUDE_MODEL_REESCRIBIR : CLAUDE_MODEL_GENERATE;
+	const formatDef = FORMATS[format];
+	const angles = mode === "crear"; // reescribir conserva el mensaje original; crear explora ángulos
+
+	const reference = await buildRelevantReference(prompt, endpoint, brand);
+	const formatGuidance = formatDef.guidance ? `\nFormato de destino: ${formatDef.label}. ${formatDef.guidance}\n` : "";
+	const task =
+		mode === "reescribir"
+			? `Ahora, con base en ese estilo, reescribe el siguiente texto para que se ajuste a mi voz y tono, conservando lo que dice:\n${prompt}`
+			: `Ahora, con base en ese estilo, responde a esta petición:\n${prompt}`;
 	const fullPrompt = `
 Eres un asistente que debe crear textos publicitarios (copy) respetando mi voz y tono.
 Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos por ser los más
-parecidos en tema al texto que me pediste reescribir:
+parecidos en tema a ${mode === "reescribir" ? "el texto que me pediste reescribir" : "lo que me pediste"}:
 
-${referenceText}
+${reference.text}
 ${formatGuidance}${storage.glossaryPrompt(brand)}
-Ahora, con base en ese estilo, reescribe el siguiente texto para que se ajuste a mi voz y tono, solo dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato de lista y limitate a solo poner las opciones no necesito nada antes ni despues de eso. el formato de lista siempre sera (* opcion1, * opcion2, * opcion3, * opcion4), no quiero que pongas ni un texto más:
-${prompt}
+${task}
+${outputInstructions({ formatDef, angles })}
 `;
-	const { text: correctedText, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_REESCRIBIR);
-	logUsage({
-		endpoint: "/reescribir",
-		provider: "claude",
-		model: CLAUDE_MODEL_REESCRIBIR,
-		...usage,
-	});
-	return correctedText;
+	const { text, usage } = await callClaude(fullPrompt, model);
+	logUsage({ endpoint, provider: "claude", model, ...usage });
+
+	let options = parseCopyResponse(text, formatDef).map((o) => checkOption(o, formatDef));
+
+	// Reintento automático solo para las opciones que se pasaron del límite.
+	const failingIdx = options.map((o, i) => (o.ok ? -1 : i)).filter((i) => i >= 0);
+	if (failingIdx.length) {
+		try {
+			const { text: fixedText, usage: fixUsage } = await callClaude(
+				shortenPrompt({ failing: failingIdx.map((i) => options[i]), formatDef, angles }),
+				model,
+			);
+			logUsage({ endpoint: `${endpoint}:recorte`, provider: "claude", model, ...fixUsage });
+			const fixed = parseCopyResponse(fixedText, formatDef).map((o) => checkOption(o, formatDef));
+			failingIdx.forEach((optIdx, k) => {
+				if (fixed[k]) options[optIdx] = { ...fixed[k], angle: fixed[k].angle || options[optIdx].angle };
+			});
+		} catch (err) {
+			console.error(`[${endpoint}] No se pudo recortar:`, err.details ?? err);
+		}
+	}
+
+	const final = options.map((o) => ({
+		text: optionText(o, formatDef),
+		angle: o.angle,
+		angleLabel: o.angle ? ANGLES[o.angle] : null,
+		fields: o.fields,
+		ok: o.ok,
+	}));
+	return {
+		raw: toLegacyList(final),
+		options: final,
+		references: {
+			method: reference.method,
+			count: reference.items.length,
+			top: reference.items[0]?.text?.slice(0, 160) || null,
+		},
+	};
 }
+
+const reescribirCore = ({ prompt, brand, format }) => runCopy({ mode: "reescribir", prompt, brand, format });
+const generateCore = ({ prompt, brand, format }) => runCopy({ mode: "crear", prompt, brand, format });
+
 
 app.post("/reescribir", async (req, res) => {
 	if (requireAuth(req, res) === null) return;
@@ -829,40 +924,12 @@ app.post("/reescribir", async (req, res) => {
 	const format = resolveFormat(req.body?.format);
 
 	try {
-		const correctedText = await reescribirCore({ prompt, brand, format });
-		res.json({ correctedText });
+		const result = await reescribirCore({ prompt, brand, format });
+		res.json({ correctedText: result.raw, options: result.options, references: result.references });
 	} catch (err) {
 		respondWithError(res, err, "/reescribir");
 	}
 });
-
-// Lógica de /generate separada del handler HTTP para reusarla desde el bot de Slack.
-async function generateCore({ prompt, brand, format }) {
-	const referenceText = await buildRelevantReference(prompt, "/generate", brand);
-	const formatGuidance = FORMATS[format].guidance
-		? `\nFormato de destino: ${FORMATS[format].label}. ${FORMATS[format].guidance}\n`
-		: "";
-	const fullPrompt = `
-Eres un asistente que debe crear textos publicitarios (copy) respetando mi voz y tono.
-Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos por ser los más
-parecidos en tema a lo que me pediste:
-
-${referenceText}
-${formatGuidance}${storage.glossaryPrompt(brand)}
-Ahora, con base en ese estilo, responde a esta petición:
-${prompt}
-
-Dame un máximo de 4 opciones, no agregues nada más, los necesito en el formato de lista y limitate a solo poner las opciones no necesito nada antes ni despues de eso. el formato de lista siempre sera (* opcion1, * opcion2, * opcion3, * opcion4), no quiero que pongas ni un texto más. No uses markdown (nada de negritas ni encabezados), no agregues emojis a menos que el ejemplo de tono los use, y no termines preguntando si quiero algo más.
-`;
-	const { text, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_GENERATE);
-	logUsage({
-		endpoint: "/generate",
-		provider: "claude",
-		model: CLAUDE_MODEL_GENERATE,
-		...usage,
-	});
-	return text;
-}
 
 app.post("/generate", async (req, res) => {
 	if (requireAuth(req, res) === null) return;
@@ -873,8 +940,8 @@ app.post("/generate", async (req, res) => {
 	const format = resolveFormat(req.body?.format);
 
 	try {
-		const text = await generateCore({ prompt, brand, format });
-		res.json({ text });
+		const result = await generateCore({ prompt, brand, format });
+		res.json({ text: result.raw, options: result.options, references: result.references });
 	} catch (err) {
 		respondWithError(res, err, "/generate");
 	}

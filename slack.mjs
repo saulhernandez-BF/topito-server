@@ -249,7 +249,7 @@ export function registerSlackRoutes(app, deps) {
 					type: "string",
 					enum: Object.keys(FORMATS),
 					description:
-						"Canal: headline = título/headline de anuncio; primario = texto primario/cuerpo de anuncio (Meta/IG ads); caption = post o caption de redes sociales (RRSS, IG, TikTok); web = copy de sitio/landing/email; general = no está claro.",
+						"Canal: headline = título/headline de anuncio de Meta; primario = texto primario/cuerpo de anuncio (Meta/IG ads); caption = post o caption de redes sociales (RRSS, IG); web = copy de sitio/landing; email = asunto y preheader de email/newsletter; google_ads = anuncio de Google/búsqueda (título + descripción); hook = gancho/primeros segundos de video TikTok/Reels; cta = texto de botón o llamado a la acción; general = no está claro.",
 				},
 				days: { type: "integer", description: "Para reporte_uso: días hacia atrás (opcional)." },
 				reply: {
@@ -273,7 +273,7 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 			? `Contexto del hilo (más antiguo primero):\n${history.join("\n")}\n\nMensaje nuevo del usuario:\n${message}`
 			: message;
 
-		const response = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
+		const response = await fetchWithTimeout(`${(process.env.ANTHROPIC_API_URL || "https://api.anthropic.com").replace(/\/$/, "")}/v1/messages`, {
 			method: "POST",
 			headers: {
 				"Content-Type": "application/json",
@@ -311,32 +311,15 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 	// Ejecución de acciones (reusa la lógica del plugin)
 	// ---------------------------------------------------------------------------
 
-	// Convierte la respuesta "* opción1\n* opción2" en un arreglo. Soporta opciones
-	// de varias líneas (texto primario) y respuestas en una sola línea.
-	function parseOptions(raw) {
-		const lines = String(raw || "").replace(/\r/g, "").split("\n");
-		const bullet = /^\s*(?:[*\-•]|\d+[.)])\s+/;
-		const options = [];
-		if (lines.some((l) => bullet.test(l))) {
-			for (const line of lines) {
-				if (bullet.test(line)) options.push(line.replace(bullet, "").trim());
-				else if (line.trim() && options.length) options[options.length - 1] += "\n" + line.trim();
-			}
-		} else {
-			options.push(...String(raw).split(/\s\*\s|^\*\s/).map((s) => s.trim()));
-		}
-		return options.map((o) => o.replace(/^["“]|["”]$/g, "").trim()).filter(Boolean).slice(0, 4);
-	}
-
 	async function runCopyAction({ action, text, brand, format }) {
 		if (action === "ortografia") {
 			return { corrected: await ortografiaCore({ prompt: text, brand }) };
 		}
-		const raw =
+		const result =
 			action === "reescribir"
 				? await reescribirCore({ prompt: text, brand, format })
 				: await generateCore({ prompt: text, brand, format });
-		return { options: parseOptions(raw) };
+		return { options: result.options, references: result.references };
 	}
 
 	function friendlyError(err) {
@@ -354,13 +337,36 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 	const brandLabel = (b) => BRANDS[b]?.label || b;
 	const formatLabel = (f) => FORMATS[f]?.label || "General";
 
-	function resultBlocks({ action, brand, format, options, corrected, original, prompt }) {
+	// "✅ Asunto 32/50 · ⚠️ Preheader 95/90"
+	function limitsLine(opt) {
+		const parts = (opt.fields || [])
+			.filter((f) => f.max || f.firstLineMax)
+			.map((f) => {
+				const name = opt.fields.length > 1 ? `${f.label} ` : "";
+				if (f.firstLineMax && !f.max) {
+					return `${f.firstLineLength <= f.firstLineMax ? "✅" : "⚠️"} ${name}1ª línea ${f.firstLineLength}/${f.firstLineMax}`;
+				}
+				return `${f.ok ? "✅" : "⚠️"} ${name}${f.length}/${f.max}`;
+			});
+		return parts.join(" · ");
+	}
+
+	function referencesLine(brand, refs) {
+		if (!refs?.count) return null;
+		const kind = refs.method === "embeddings" ? "ejemplos reales parecidos" : "ejemplos reales al azar";
+		const top = refs.top ? ` · el más cercano: “${esc(truncate(refs.top.replace(/\s+/g, " "), 110))}”` : "";
+		return `📚 Inspirado en ${refs.count} ${kind} de ${brandLabel(brand)}${top}`;
+	}
+
+	function resultBlocks({ action, brand, format, options, references, corrected, original, prompt }) {
 		const blocks = [];
 		const meta =
 			action === "ortografia"
 				? `${ACTION_LABELS.ortografia} · ${brandLabel(brand)}`
 				: `${ACTION_LABELS[action]} · ${brandLabel(brand)} · ${formatLabel(format)}`;
 		blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: meta }] });
+		const refLine = action !== "ortografia" ? referencesLine(brand, references) : null;
+		if (refLine) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: refLine }] });
 
 		if (action === "ortografia") {
 			const same = corrected.trim() === String(original || "").trim();
@@ -380,17 +386,16 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 			blocks.push({
 				type: "section",
 				block_id: `opt_${i}`,
-				text: { type: "mrkdwn", text: `*Opción ${i + 1}*\n${esc(truncate(opt, 2800))}` },
+				text: { type: "mrkdwn", text: `*Opción ${i + 1}*${opt.angleLabel ? `  ·  ${opt.angleLabel}` : ""}\n${optionBody(opt)}` },
 			});
-			const banned = storage?.glossaryViolations?.(brand, opt) || [];
-			if (banned.length) {
-				blocks.push({
-					type: "context",
-					elements: [{ type: "mrkdwn", text: `⚠️ Usa palabras prohibidas del glosario: ${banned.map((w) => `“${esc(w)}”`).join(", ")}` }],
-				});
-			}
+			const notes = [];
+			const limits = limitsLine(opt);
+			if (limits) notes.push(limits);
+			const banned = storage?.glossaryViolations?.(brand, opt.text) || [];
+			if (banned.length) notes.push(`⚠️ Glosario: ${banned.map((w) => `“${esc(w)}”`).join(", ")}`);
+			if (notes.length) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: notes.join("   ") }] });
 			const val = (rating) =>
-				JSON.stringify({ r: rating, b: brand, s: action === "reescribir" ? "reescribir" : "crear", t: truncate(opt, 1800) });
+				JSON.stringify({ r: rating, b: brand, s: action === "reescribir" ? "reescribir" : "crear", t: truncate(opt.text, 1800) });
 			blocks.push({
 				type: "actions",
 				block_id: `rate_${i}`,
@@ -424,10 +429,16 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 		return blocks;
 	}
 
+	function optionBody(opt) {
+		const fields = opt.fields || [];
+		if (fields.length > 1) return fields.map((f) => `*${f.label}:* ${esc(truncate(f.value, 1200))}`).join("\n");
+		return esc(truncate(opt.text, 2800));
+	}
+
 	// Texto de respaldo (notificaciones y contexto del hilo para el router).
 	function fallbackText({ action, options, corrected }) {
 		if (action === "ortografia") return `Texto corregido:\n${corrected}`;
-		return options.map((o, i) => `${i + 1}. ${o}`).join("\n") || "Sin opciones";
+		return options.map((o, i) => `${i + 1}. ${o.text}`).join("\n") || "Sin opciones";
 	}
 
 	async function usageBlocks(days) {
@@ -462,6 +473,7 @@ Siempre llama a la herramienta ejecutar_accion. Si el usuario pega un texto y pi
 		.join(" y ")}. Háblame normal, por ejemplo:
 • _Escribe 3 headlines para la colección de lentes de sol_
 • _Reescribe con nuestro tono este caption: …_
+• _Asunto y preheader para el email de la colección_ · _4 títulos de Google Ads para lentes de sol_ · _hooks para un Reel_
 • _Revisa la ortografía de: …_
 • _Ahora hazlo para Bombavista_ / _más corto_ (en el mismo hilo)
 • _Reporte de uso de los últimos 7 días_
