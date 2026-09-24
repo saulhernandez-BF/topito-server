@@ -1,15 +1,4 @@
 {
-  "generatedAt": "2026-09-24T20:21:22.152Z",
-  "matches": [
-    {
-      "brand": "benandfrank",
-      "topitoText": "Ópticos Ben & Frank, hechos para ver(te) mejor",
-      "adText": "Ben & Frank",
-      "similarity": 1,
-      "via": "slack",
-      "impressions": 99080208,
-      "ctr": 0.00437,
-      "score": 0.531
-    }
-  ]
+  "generatedAt": null,
+  "matches": []
 }

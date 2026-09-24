@@ -266,10 +266,14 @@ const tokens = (s) => new Set(normalizeCopy(s).split(" ").filter((w) => w.length
 function similarity(a, b) {
 	const A = tokens(a);
 	const B = tokens(b);
-	if (!A.size || !B.size) return 0;
+	// Textos muy cortos ("Ben & Frank") coinciden con cualquier cosa: no cuentan.
+	if (A.size < 4 || B.size < 4) return 0;
 	let inter = 0;
 	for (const w of A) if (B.has(w)) inter++;
-	return inter / Math.min(A.size, B.size); // "contenido en": tolera que agreguen o quiten una frase
+	// "Contenido en" tolera que agreguen o quiten una frase, pero ambos textos deben
+	// compartir al menos la mitad del total (evita que uno corto quepa en uno largo).
+	if (inter / Math.max(A.size, B.size) < 0.5) return 0;
+	return inter / Math.min(A.size, B.size);
 }
 
 async function findPublished(perfByBrand) {
