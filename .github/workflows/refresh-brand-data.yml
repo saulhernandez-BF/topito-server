@@ -88,6 +88,10 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: npm run sync-likes
 
+      - name: Limpiar ejemplos (legales y duplicados)
+        continue-on-error: true
+        run: npm run clean-tuning
+
       - name: Recalcular embeddings pendientes
         id: embeddings
         continue-on-error: true

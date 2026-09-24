@@ -410,6 +410,7 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 				elements: [
 					{ type: "button", action_id: `like_${i}`, text: { type: "plain_text", text: "👍 Me encanta", emoji: true }, value: val("like") },
 					{ type: "button", action_id: `neutral_${i}`, text: { type: "plain_text", text: "⚪ Sirve con ajustes", emoji: true }, value: val("neutral") },
+					{ type: "button", action_id: `dislike_${i}`, text: { type: "plain_text", text: "👎 No va", emoji: true }, value: val("bad") },
 					{
 						type: "button",
 						action_id: `figma_${i}`,
@@ -964,13 +965,15 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 				return;
 			}
 
-			if (/^(like|neutral)_\w+$/.test(act.action_id)) {
-				const { r, b, s, t } = JSON.parse(act.value);
+			if (/^(like|neutral|dislike)_\w+$/.test(act.action_id)) {
+				const { r, b, s: rawSource, t } = JSON.parse(act.value);
 				const idx = act.action_id.split("_")[1];
+				// 👎 explícito: se marca para distinguirlo del "bad" automático (ver storage.loadDislikes).
+				const s = r === "bad" ? `${rawSource}-explicito` : rawSource;
 				saveFeedback({ text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
 				if (message?.blocks && payload.response_url) {
 					// Reemplazamos los botones de esa opción por la calificación.
-					const label = `${r === "like" ? "👍 Me encanta" : "⚪ Sirve con ajustes"} — <@${userId}>`;
+					const label = `${r === "like" ? "👍 Me encanta" : r === "bad" ? "👎 No va (Topito evitará algo así)" : "⚪ Sirve con ajustes"} — <@${userId}>`;
 					const blocks = message.blocks.map((blk) => {
 						if (blk.block_id === `rate_${idx}`) {
 							return { type: "context", block_id: `rated_${idx}`, elements: [{ type: "mrkdwn", text: label }] };

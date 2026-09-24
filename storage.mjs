@@ -274,6 +274,18 @@ export function createStorage({ fetchWithTimeout }) {
 			});
 		},
 
+		// 👎 explícitos (botón "No va" en Slack): se usan como ejemplos a EVITAR.
+		// Los "bad" automáticos (pedir otra tanda sin calificar) NO entran: son ruido.
+		async loadDislikes(limit = 60) {
+			if (!dbEnabled) return [];
+			try {
+				return await sb(`feedback?select=brand,text&rating=eq.bad&source=like.*-explicito&order=id.desc&limit=${limit}`);
+			} catch (err) {
+				console.error("[storage] No se pudieron leer los 👎:", err.message);
+				return [];
+			}
+		},
+
 		// --- Fase 3: resumen semanal ---
 		async loadRecentLikes(days = 7, limit = 8) {
 			if (!dbEnabled) return [];

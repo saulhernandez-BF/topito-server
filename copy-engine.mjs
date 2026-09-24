@@ -132,3 +132,43 @@ export function shortenPrompt({ failing, formatDef, angles }) {
 ${JSON.stringify({ opciones: payload })}
 ${outputInstructions({ formatDef, angles, count: payload.length })}`;
 }
+
+// =============================================================================
+// Limpieza de la base de ejemplos (la usan server.mjs y scripts/clean-tuning.mjs)
+// =============================================================================
+
+// Clave para detectar duplicados "iguales salvo detalles": sin acentos, sin
+// mayúsculas, sin URLs, sin emojis ni signos. "¡Lentes desde $990!" y
+// "lentes desde 990 🤓" quedan igual.
+export function normalizeCopy(text) {
+	return String(text || "")
+		.normalize("NFD")
+		.replace(/[̀-ͯ]/g, "")
+		.toLowerCase()
+		.replace(/https?:\/\/\S+/g, " ")
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.trim();
+}
+
+// Páginas legales del sitio (términos, aviso de privacidad...): no son tono de
+// marca y se colaban como "ejemplos" en los prompts.
+const JUNK_URL_RE = /(terminos|t%C3%A9rminos|aviso-de-privacidad|privacidad|politica|legal|cookies)/i;
+export function isJunkCopy(item) {
+	if (!item?.text) return true;
+	if (item.source === "website" && JUNK_URL_RE.test(item.url || "")) return true;
+	return false;
+}
+
+// Quita basura y duplicados normalizados (se queda con el primero que aparece).
+export function cleanReferenceList(items) {
+	const seen = new Set();
+	const out = [];
+	for (const item of items) {
+		if (isJunkCopy(item)) continue;
+		const key = normalizeCopy(item.text);
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		out.push(item);
+	}
+	return out;
+}

@@ -6,7 +6,18 @@ import crypto from "crypto";
 import { fileURLToPath } from "url";
 import { registerSlackRoutes } from "./slack.mjs";
 import { createStorage } from "./storage.mjs";
-import { ANGLES, outputInstructions, parseCopyResponse, checkOption, optionText, toLegacyList, shortenPrompt } from "./copy-engine.mjs";
+import {
+	ANGLES,
+	outputInstructions,
+	parseCopyResponse,
+	checkOption,
+	optionText,
+	toLegacyList,
+	shortenPrompt,
+	cleanReferenceList,
+	normalizeCopy,
+	isJunkCopy,
+} from "./copy-engine.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,6 +48,7 @@ const CLAUDE_MODEL_GENERATE = process.env.CLAUDE_MODEL_GENERATE || "claude-sonne
 const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
 const EMBEDDING_DIMENSIONS = 768;
 const REFERENCE_TOP_K = Number(process.env.REFERENCE_TOP_K) || 12;
+const REFERENCE_MAX_SIMILARITY = Number(process.env.REFERENCE_MAX_SIMILARITY) || 0.93;
 
 if (!GOOGLE_API_KEY) {
 	console.error(
@@ -497,8 +509,9 @@ function loadBrandData(brandKey) {
 		console.warn(`Aviso: no se encontró ${tuningPath}; "${brandKey}" no tiene ejemplos de tono todavía.`);
 	}
 
-	const referenceData = rawReferenceData.filter(
-		(item) => (item.text?.length ?? 0) > 0 && item.text.length <= MAX_REFERENCE_TEXT_LENGTH,
+	// Sin páginas legales ni duplicados normalizados (ver copy-engine.mjs).
+	const referenceData = cleanReferenceList(
+		rawReferenceData.filter((item) => (item.text?.length ?? 0) > 0 && item.text.length <= MAX_REFERENCE_TEXT_LENGTH),
 	);
 	console.log(
 		`[${brandKey}] Referencia de tono: ${referenceData.length}/${rawReferenceData.length} textos usados ` +
@@ -516,7 +529,9 @@ function loadBrandData(brandKey) {
 					`Corre "npm run build-embeddings" para actualizarlo.`,
 			);
 		}
-		referenceEmbeddings = cache.items;
+		// Solo vectores de textos que siguen en la referencia limpia.
+		const validTexts = new Set(referenceData.map((i) => i.text));
+		referenceEmbeddings = cache.items.filter((i) => validTexts.has(i.text) && !isJunkCopy(i));
 		console.log(`[${brandKey}] Embeddings cargados: ${referenceEmbeddings.length} vectores.`);
 	} catch {
 		if (referenceData.length > 0) {
@@ -551,6 +566,29 @@ storage.loadLikedCopies().then((rows) => {
 	if (rows.length) console.log(`[storage] ${added} copys 👍 de Supabase agregados como referencia de tono.`);
 });
 
+// 👎 explícitos por marca (más recientes primero), para decirle al modelo qué evitar.
+const DISLIKES_IN_PROMPT = 6;
+const dislikesByBrand = {};
+async function refreshDislikes() {
+	const rows = await storage.loadDislikes();
+	const next = {};
+	for (const { brand, text } of rows) {
+		if (!text) continue;
+		(next[brand] ||= []).length < DISLIKES_IN_PROMPT * 2 && next[brand].push(text);
+	}
+	for (const b of Object.keys(BRANDS)) dislikesByBrand[b] = next[b] || [];
+}
+refreshDislikes().catch(() => {});
+setInterval(() => refreshDislikes().catch(() => {}), 10 * 60 * 1000).unref();
+
+function dislikesPrompt(brand) {
+	const list = (dislikesByBrand[brand] || []).slice(0, DISLIKES_IN_PROMPT);
+	if (!list.length) return "";
+	return `\nEl equipo RECHAZÓ estas opciones anteriores. No te parezcas a ellas (ni en estructura, ni en frases, ni en arranque):\n${list
+		.map((t) => `- ${t.replace(/\s+/g, " ").slice(0, 300)}`)
+		.join("\n")}\n`;
+}
+
 function resolveBrand(req, res) {
 	const brand = req.body?.brand || DEFAULT_BRAND;
 	if (!BRANDS[brand]) {
@@ -576,7 +614,50 @@ function randomReference(brand) {
 
 // Embedding del texto de la petición (RETRIEVAL_QUERY), para compararlo contra los
 // embeddings de referencia (RETRIEVAL_DOCUMENT) y elegir los más relevantes.
+// Caché en memoria (misma petición = mismo vector) y "corte" cuando Gemini dice
+// que se acabó la cuota: así no gastamos la cuota diaria (~1,000/día en free
+// tier, compartida con el workflow) ni esperamos una llamada que va a fallar.
+const QUERY_CACHE_MAX = 500;
+const queryEmbeddingCache = new Map();
+let embedPausedUntil = 0;
+
+function nextQuotaReset() {
+	// La cuota diaria de Gemini se reinicia a medianoche hora del Pacífico (~07:00-08:00 UTC).
+	const d = new Date();
+	d.setUTCHours(8, 5, 0, 0);
+	if (d.getTime() <= Date.now()) d.setUTCDate(d.getUTCDate() + 1);
+	return d.getTime();
+}
+
 async function embedQuery(text) {
+	const key = normalizeCopy(text).slice(0, 2000);
+	const cached = queryEmbeddingCache.get(key);
+	if (cached) {
+		queryEmbeddingCache.delete(key); // LRU: al final = usado recientemente
+		queryEmbeddingCache.set(key, cached);
+		return { vector: cached, cached: true };
+	}
+	if (Date.now() < embedPausedUntil) {
+		const err = new Error("Embeddings en pausa por cuota de Gemini");
+		err.paused = true;
+		throw err;
+	}
+	try {
+		const vector = await embedQueryRemote(text);
+		queryEmbeddingCache.set(key, vector);
+		if (queryEmbeddingCache.size > QUERY_CACHE_MAX) queryEmbeddingCache.delete(queryEmbeddingCache.keys().next().value);
+		return { vector, cached: false };
+	} catch (err) {
+		if (err.details?.code === 429) {
+			const daily = (err.details.details || []).some((d) => (d.violations || []).some((v) => /PerDay/i.test(v.quotaId || "")));
+			embedPausedUntil = daily ? nextQuotaReset() : Date.now() + 60_000;
+			console.warn(`[embeddings] Cuota de Gemini agotada (${daily ? "diaria" : "por minuto"}); pausa hasta ${new Date(embedPausedUntil).toISOString()}.`);
+		}
+		throw err;
+	}
+}
+
+async function embedQueryRemote(text) {
 	const url = `https://generativelanguage.googleapis.com/v1beta/models/${EMBEDDING_MODEL}:embedContent?key=${GOOGLE_API_KEY}`;
 	const res = await fetchWithTimeout(url, {
 		method: "POST",
@@ -607,8 +688,8 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 	}
 
 	try {
-		const queryVector = await embedQuery(promptText);
-		logUsage({
+		const { vector: queryVector, cached } = await embedQuery(promptText);
+		if (!cached) logUsage({
 			endpoint: `${endpointForLog}:embedding`,
 			provider: "gemini-embedding",
 			model: EMBEDDING_MODEL,
@@ -616,10 +697,17 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 			outputTokens: 0,
 		});
 
-		const ranked = referenceEmbeddings
+		const sorted = referenceEmbeddings
 			.map((item) => ({ item, score: cosineSimilarity(queryVector, item.embedding) }))
-			.sort((a, b) => b.score - a.score)
-			.slice(0, REFERENCE_TOP_K);
+			.sort((a, b) => b.score - a.score);
+		// Variedad: si un candidato es casi idéntico (≥ REFERENCE_MAX_SIMILARITY) a uno ya
+		// elegido -- ej. el mismo anuncio con otro precio --, se salta y se toma el siguiente.
+		const ranked = [];
+		for (const cand of sorted) {
+			if (ranked.length >= REFERENCE_TOP_K) break;
+			if (ranked.some((r) => cosineSimilarity(r.item.embedding, cand.item.embedding) >= REFERENCE_MAX_SIMILARITY)) continue;
+			ranked.push(cand);
+		}
 
 		return {
 			text: ranked.map((r) => r.item.text).join("\n\n"),
@@ -627,7 +715,7 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 			items: ranked.map((r) => ({ text: r.item.text, score: r.score })),
 		};
 	} catch (err) {
-		console.error(`[${brand}] Fallback a muestreo al azar (falló la selección por relevancia):`, err);
+		if (!err.paused) console.error(`[${brand}] Fallback a muestreo al azar (falló la selección por relevancia):`, err.details ?? err);
 		return randomReference(brand);
 	}
 }
@@ -866,7 +954,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema a ${mode === "reescribir" ? "el texto que me pediste reescribir" : "lo que me pediste"}:
 
 ${reference.text}
-${formatGuidance}${storage.glossaryPrompt(brand)}
+${formatGuidance}${storage.glossaryPrompt(brand)}${dislikesPrompt(brand)}
 ${task}
 ${outputInstructions({ formatDef, angles })}
 `;
@@ -961,6 +1049,9 @@ function saveFeedback({ text, rating, source, brand, original, author, channel }
 	logFeedback({ text, rating, source: source || "desconocido", brand, original, author, channel });
 	if (rating === "like") {
 		addLikedTextToTuning(brand, text);
+	}
+	if (rating === "bad" && String(source || "").endsWith("-explicito") && text) {
+		dislikesByBrand[brand] = [text, ...(dislikesByBrand[brand] || []).filter((t) => t !== text)].slice(0, DISLIKES_IN_PROMPT * 2);
 	}
 }
 
