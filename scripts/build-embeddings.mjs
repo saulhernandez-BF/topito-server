@@ -124,7 +124,17 @@ async function processBrand(brand, startedAt) {
 
 	const existing = loadExisting(outputPath);
 	const alreadyDone = new Set(existing.items.map((i) => i.text));
-	const pending = referenceData.filter((item) => !alreadyDone.has(item.text));
+	// Primero los textos con mejor desempeño en Meta (performance.json): con la cuota
+	// diaria limitada, conviene que los "ganadores" entren antes a la búsqueda.
+	let perfScore = () => 0.5;
+	try {
+		const { normalizeCopy } = await import("../copy-engine.mjs");
+		const perf = new Map(JSON.parse(fs.readFileSync(path.join(dir, "performance.json"), "utf-8")).items.map((i) => [i.key, i.score]));
+		perfScore = (text) => perf.get(normalizeCopy(text)) ?? 0.5;
+	} catch {}
+	const pending = referenceData
+		.filter((item) => !alreadyDone.has(item.text))
+		.sort((a, b) => perfScore(b.text) - perfScore(a.text));
 
 	console.log(
 		`[${brand}] ${referenceData.length} textos de referencia (se descartaron ${rawReferenceData.length - referenceData.length} por texto legal/vacío). ` +

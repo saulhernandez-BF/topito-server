@@ -15,5 +15,10 @@ for (const brand of ["benandfrank", "bombavista"]) {
 		const p = JSON.parse(fs.readFileSync(`data/${brand}/.meta-ads-progress.json`, "utf-8"));
 		progress = ` (backfill en curso: ${p.adsCount} anuncios revisados)`;
 	} catch {}
-	console.log(`${brand}: ${examples} ejemplos, ${embeddings} embeddings${progress}`);
+	let perf = "";
+	try {
+		const items = JSON.parse(fs.readFileSync(`data/${brand}/performance.json`, "utf-8")).items;
+		perf = `, ${items.length} con desempeño (${items.filter((i) => i.score >= 0.8).length} top)`;
+	} catch {}
+	console.log(`${brand}: ${examples} ejemplos, ${embeddings} embeddings${perf}${progress}`);
 }

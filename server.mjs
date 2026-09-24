@@ -49,6 +49,10 @@ const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-
 const EMBEDDING_DIMENSIONS = 768;
 const REFERENCE_TOP_K = Number(process.env.REFERENCE_TOP_K) || 12;
 const REFERENCE_MAX_SIMILARITY = Number(process.env.REFERENCE_MAX_SIMILARITY) || 0.93;
+// Cuánto pesa el desempeño en Meta al elegir referencias (el parecido va de ~0.5 a ~0.85;
+// con 0.08, un texto top (score 1) le gana a uno sin datos con hasta 0.04 menos de parecido).
+const PERFORMANCE_WEIGHT = Number(process.env.PERFORMANCE_WEIGHT ?? 0.08);
+const TOP_PERFORMER_SCORE = 0.8;
 
 if (!GOOGLE_API_KEY) {
 	console.error(
@@ -542,7 +546,22 @@ function loadBrandData(brandKey) {
 		}
 	}
 
-	return { referenceData, referenceEmbeddings };
+	// Desempeño real en Meta (scripts/fetch-ad-performance.mjs): score 0..1 por texto.
+	const performance = new Map();
+	try {
+		const perf = JSON.parse(fs.readFileSync(path.join(dir, "performance.json"), "utf-8"));
+		for (const it of perf.items || []) performance.set(it.key, it);
+		console.log(`[${brandKey}] Desempeño cargado: ${performance.size} textos con score.`);
+	} catch {
+		/* todavía no hay performance.json: se rankea solo por parecido */
+	}
+
+	return { referenceData, referenceEmbeddings, performance };
+}
+
+// Score de desempeño (0..1) de un texto, o null si no hay datos suficientes.
+function performanceOf(brand, text) {
+	return brandData[brand]?.performance?.get(normalizeCopy(text))?.score ?? null;
 }
 
 const brandData = {};
@@ -601,15 +620,18 @@ function resolveBrand(req, res) {
 function buildStyleReference(brand, sampleSize = 20) {
 	const { referenceData } = brandData[brand];
 	if (referenceData.length === 0) return "";
-	const sampleData = shuffle(referenceData).slice(0, Math.min(sampleSize, referenceData.length));
-	return sampleData.map((item) => item.text).join("\n\n");
+	// Mitad de la muestra sale de los textos con mejor desempeño en Meta (si hay).
+	const top = shuffle(referenceData.filter((i) => (performanceOf(brand, i.text) ?? 0) >= TOP_PERFORMER_SCORE)).slice(0, Math.floor(sampleSize / 2));
+	const topSet = new Set(top);
+	const rest = shuffle(referenceData.filter((i) => !topSet.has(i))).slice(0, sampleSize - top.length);
+	return [...top.map((i) => `★ ${i.text}`), ...rest.map((i) => i.text)].join("\n\n");
 }
 
 // Igual que buildStyleReference pero con metadatos para mostrar "inspirado en…".
 function randomReference(brand) {
 	const text = buildStyleReference(brand);
-	const items = text ? text.split("\n\n").map((t) => ({ text: t, score: null })) : [];
-	return { text, method: "random", items };
+	const items = text ? text.split("\n\n").map((t) => ({ text: t.replace(/^★ /, ""), score: null })) : [];
+	return { text, method: "random", items, topPerformers: (text.match(/^★ /gm) || []).length };
 }
 
 // Embedding del texto de la petición (RETRIEVAL_QUERY), para compararlo contra los
@@ -698,7 +720,13 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 		});
 
 		const sorted = referenceEmbeddings
-			.map((item) => ({ item, score: cosineSimilarity(queryVector, item.embedding) }))
+			.map((item) => {
+				const similarity = cosineSimilarity(queryVector, item.embedding);
+				const perf = performanceOf(brand, item.text);
+				// Sin datos de desempeño = neutral (0.5): ni premia ni castiga.
+				const score = similarity + PERFORMANCE_WEIGHT * ((perf ?? 0.5) - 0.5);
+				return { item, score, similarity, perf };
+			})
 			.sort((a, b) => b.score - a.score);
 		// Variedad: si un candidato es casi idéntico (≥ REFERENCE_MAX_SIMILARITY) a uno ya
 		// elegido -- ej. el mismo anuncio con otro precio --, se salta y se toma el siguiente.
@@ -710,9 +738,10 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 		}
 
 		return {
-			text: ranked.map((r) => r.item.text).join("\n\n"),
+			text: ranked.map((r) => (r.perf != null && r.perf >= TOP_PERFORMER_SCORE ? `★ ${r.item.text}` : r.item.text)).join("\n\n"),
 			method: "embeddings",
-			items: ranked.map((r) => ({ text: r.item.text, score: r.score })),
+			items: ranked.map((r) => ({ text: r.item.text, score: r.similarity, perf: r.perf })),
+			topPerformers: ranked.filter((r) => r.perf != null && r.perf >= TOP_PERFORMER_SCORE).length,
 		};
 	} catch (err) {
 		if (!err.paused) console.error(`[${brand}] Fallback a muestreo al azar (falló la selección por relevancia):`, err.details ?? err);
@@ -954,7 +983,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema a ${mode === "reescribir" ? "el texto que me pediste reescribir" : "lo que me pediste"}:
 
 ${reference.text}
-${formatGuidance}${storage.glossaryPrompt(brand)}${dislikesPrompt(brand)}
+${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${dislikesPrompt(brand)}
 ${task}
 ${outputInstructions({ formatDef, angles })}
 `;
@@ -999,6 +1028,7 @@ ${outputInstructions({ formatDef, angles })}
 		references: {
 			method: reference.method,
 			count: reference.items.length,
+			topPerformers: reference.topPerformers || 0,
 			top: reference.items[0]?.text?.slice(0, 160) || null,
 		},
 	};
@@ -1295,9 +1325,22 @@ registerSlackRoutes(app, {
 		Object.fromEntries(
 			Object.keys(BRANDS).map((b) => [
 				b,
-				{ examples: brandData[b].referenceData.length, embeddings: brandData[b].referenceEmbeddings?.length || 0 },
+				{
+					examples: brandData[b].referenceData.length,
+					embeddings: brandData[b].referenceEmbeddings?.length || 0,
+					withPerformance: brandData[b].performance?.size || 0,
+					topPerformers: [...(brandData[b].performance?.values() || [])].filter((i) => i.score >= TOP_PERFORMER_SCORE).length,
+				},
 			]),
 		),
+	// Copys de Topito detectados en anuncios reales (scripts/fetch-ad-performance.mjs).
+	topitoPublished: () => {
+		try {
+			return JSON.parse(fs.readFileSync(path.join(__dirname, "data", "topito-published.json"), "utf-8"));
+		} catch {
+			return null;
+		}
+	},
 });
 
 const PORT = process.env.PORT || 3000;

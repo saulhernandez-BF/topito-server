@@ -88,6 +88,17 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: npm run sync-likes
 
+      - name: Desempeño de anuncios (CTR + costo por compra)
+        id: perf
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          AD_PERF_MAX_RUNTIME_MS: "900000" # 15 min; si no alcanza, sigue mañana
+        run: npm run fetch-ad-performance
+
       - name: Limpiar ejemplos (legales y duplicados)
         continue-on-error: true
         run: npm run clean-tuning
@@ -128,18 +139,19 @@ jobs:
       # mensaje; aquí solo se le manda el resumen (mismo secreto que el digest).
       # Que se acabe la cuota diaria de Gemini NO cuenta como error.
       - name: Avisar en Slack si algo falló
-        if: always() && (job.status == 'failure' || steps.meta.outcome == 'failure' || steps.likes.outcome == 'failure' || steps.embeddings.outcome == 'failure')
+        if: always() && (job.status == 'failure' || steps.meta.outcome == 'failure' || steps.likes.outcome == 'failure' || steps.perf.outcome == 'failure' || steps.embeddings.outcome == 'failure')
         continue-on-error: true
         env:
           TOPITO_SHEET_SECRET: ${{ secrets.TOPITO_SHEET_SECRET }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           META: ${{ steps.meta.outcome }}
           LIKES: ${{ steps.likes.outcome }}
+          PERF: ${{ steps.perf.outcome }}
           EMB: ${{ steps.embeddings.outcome }}
           JOB: ${{ job.status }}
         run: |
           AFTER=$(tr '\n' ' ' < after.txt 2>/dev/null || echo "sin conteo")
-          TEXT=$(printf 'Falló la actualización diaria de la base de conocimiento.\nMeta Ads: %s · 👍: %s · Embeddings: %s · Guardado: %s\nBase actual: %s\nLog: %s' "$META" "$LIKES" "$EMB" "$JOB" "$AFTER" "$RUN_URL")
+          TEXT=$(printf 'Falló la actualización diaria de la base de conocimiento.\nMeta Ads: %s · 👍: %s · Desempeño: %s · Embeddings: %s · Guardado: %s\nBase actual: %s\nLog: %s' "$META" "$LIKES" "$PERF" "$EMB" "$JOB" "$AFTER" "$RUN_URL")
           curl -s -m 90 -o /dev/null https://topito-server.onrender.com/health || true
           jq -n --arg text "$TEXT" '{text: $text}' > alert.json
           curl -s -m 60 -X POST -H "Content-Type: application/json" \

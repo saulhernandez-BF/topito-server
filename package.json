@@ -7,7 +7,8 @@
     "build-embeddings": "node scripts/build-embeddings.mjs",
     "fetch-meta-ads": "node scripts/fetch-meta-ads.mjs",
     "sync-likes": "node scripts/sync-likes.mjs",
-    "clean-tuning": "node scripts/clean-tuning.mjs"
+    "clean-tuning": "node scripts/clean-tuning.mjs",
+    "fetch-ad-performance": "node scripts/fetch-ad-performance.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

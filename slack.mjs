@@ -57,6 +57,7 @@ export function registerSlackRoutes(app, deps) {
 		storage,
 		requireInternalSecret,
 		knowledgeStats,
+		topitoPublished,
 	} = deps;
 
 	const BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
@@ -363,7 +364,8 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 		if (!refs?.count) return null;
 		const kind = refs.method === "embeddings" ? "ejemplos reales parecidos" : "ejemplos reales al azar";
 		const top = refs.top ? ` · el más cercano: “${esc(truncate(refs.top.replace(/\s+/g, " "), 110))}”` : "";
-		return `📚 Inspirado en ${refs.count} ${kind} de ${brandLabel(brand)}${top}`;
+		const winners = refs.topPerformers ? ` (${refs.topPerformers} ★ de los que mejor funcionaron en anuncios)` : "";
+		return `📚 Inspirado en ${refs.count} ${kind} de ${brandLabel(brand)}${winners}${top}`;
 	}
 
 	function resultBlocks({ action, brand, format, options, references, corrected, original, prompt }) {
@@ -701,8 +703,21 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 		for (const l of likes) likesBy[l.brand] = (likesBy[l.brand] || 0) + 1;
 		const top = likes.slice(0, 5).map((l) => `• _${esc(truncate(l.text.replace(/\s+/g, " "), 160))}_ — ${brandLabel(l.brand)}${l.author ? ` · ${esc(l.author.split("@")[0])}` : ""}`);
 		const kbLine = Object.entries(kb)
-			.map(([b, v]) => `• ${brandLabel(b)}: ${v.examples.toLocaleString("es-MX")} ejemplos (${v.embeddings.toLocaleString("es-MX")} con búsqueda por parecido)`)
+			.map(
+				([b, v]) =>
+					`• ${brandLabel(b)}: ${v.examples.toLocaleString("es-MX")} ejemplos (${v.embeddings.toLocaleString("es-MX")} con búsqueda por parecido` +
+					`${v.withPerformance ? `, ${v.withPerformance.toLocaleString("es-MX")} con desempeño real · ${v.topPerformers} ★` : ""})`,
+			)
 			.join("\n");
+		// Copys de Topito que terminaron en anuncios, con su desempeño (score 0..1 = percentil).
+		const pub = topitoPublished ? topitoPublished() : null;
+		const pubLines = (pub?.matches || [])
+			.slice(0, 5)
+			.map(
+				(m) =>
+					`• _${esc(truncate(m.adText.replace(/\s+/g, " "), 140))}_ — ${brandLabel(m.brand)} · CTR ${(m.ctr * 100).toFixed(2)}% · ` +
+					`${m.score >= 0.8 ? "★ top" : m.score >= 0.5 ? "arriba de la mediana" : "abajo de la mediana"}`,
+			);
 		return [
 			{ type: "header", text: { type: "plain_text", text: "📊 Topito — resumen de la semana" } },
 			{
@@ -715,6 +730,17 @@ Califica las opciones con 👍 / ⚪ — así aprendo el tono del equipo.`;
 			},
 			{ type: "section", text: { type: "mrkdwn", text: `*Copys favoritos de la semana*\n${top.join("\n") || "_Aún no hay 👍 esta semana._"}` } },
 			...(kbLine ? [{ type: "section", text: { type: "mrkdwn", text: `*Base de conocimiento*\n${kbLine}` } }] : []),
+			...(pub
+				? [
+						{
+							type: "section",
+							text: {
+								type: "mrkdwn",
+								text: `*Copys de Topito que ya están en anuncios* (${pub.matches.length})\n${pubLines.join("\n") || "_Todavía no detecto ninguno. Se compara contra los 👍/⚪ y la bandeja de Figma._"}`,
+							},
+						},
+					]
+				: []),
 			{ type: "context", elements: [{ type: "mrkdwn", text: "Califica con 👍 las opciones que te gusten: así Topito aprende el tono del equipo." }] },
 		];
 	}
