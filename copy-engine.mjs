@@ -172,3 +172,16 @@ export function cleanReferenceList(items) {
 	}
 	return out;
 }
+
+// Motivos rápidos para ⚪ "Sirve con ajustes" y 👎 "No va" (Slack, plugin, Docs/Sheets).
+// Se guarda la clave; la etiqueta es lo que ve la persona y lo que lee el modelo.
+export const FEEDBACK_REASONS = {
+	tono: "No suena a la marca",
+	largo: "Muy largo",
+	generico: "Muy genérico / sin gancho",
+	ortografia: "Ortografía o tildes",
+	dato: "Dato o promo incorrecta",
+	pais: "No respeta el país",
+	cta: "Falta llamado a la acción",
+};
+export const cleanReasons = (list) => [...new Set((Array.isArray(list) ? list : []).filter((r) => FEEDBACK_REASONS[r]))];

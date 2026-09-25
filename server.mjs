@@ -17,6 +17,8 @@ import {
 	cleanReferenceList,
 	normalizeCopy,
 	isJunkCopy,
+	FEEDBACK_REASONS,
+	cleanReasons,
 } from "./copy-engine.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -588,17 +590,25 @@ storage.loadLikedCopies().then((rows) => {
 	if (rows.length) console.log(`[storage] ${added} copys 👍 de Supabase agregados como referencia de tono.`);
 });
 
-// 👎 explícitos por marca (más recientes primero), para decirle al modelo qué evitar.
+// 👎 explícitos por marca (más recientes primero), para decirle al modelo qué evitar,
+// y "lecciones": los motivos (chips + comentario) de ⚪/👎 de las últimas semanas.
 const DISLIKES_IN_PROMPT = 6;
-const dislikesByBrand = {};
+const dislikesByBrand = {}; // brand -> [{ text, reasons, comment }]
+const lessonsByBrand = {}; // brand -> [{ rating, text, reasons, comment, country }]
+const reasonLabel = (r) => FEEDBACK_REASONS[r] || r;
 async function refreshDislikes() {
-	const rows = await storage.loadDislikes();
+	const [rows, lessons] = await Promise.all([storage.loadDislikes(), storage.loadFeedbackLessons()]);
 	const next = {};
-	for (const { brand, text } of rows) {
+	for (const { brand, text, reasons, comment } of rows) {
 		if (!text) continue;
-		(next[brand] ||= []).length < DISLIKES_IN_PROMPT * 2 && next[brand].push(text);
+		(next[brand] ||= []).length < DISLIKES_IN_PROMPT * 2 && next[brand].push({ text, reasons: reasons || [], comment: comment || "" });
 	}
-	for (const b of Object.keys(BRANDS)) dislikesByBrand[b] = next[b] || [];
+	const nextLessons = {};
+	for (const l of lessons) (nextLessons[l.brand] ||= []).push(l);
+	for (const b of Object.keys(BRANDS)) {
+		dislikesByBrand[b] = next[b] || [];
+		lessonsByBrand[b] = nextLessons[b] || [];
+	}
 }
 refreshDislikes().catch(() => {});
 setInterval(() => refreshDislikes().catch(() => {}), 10 * 60 * 1000).unref();
@@ -607,8 +617,29 @@ function dislikesPrompt(brand) {
 	const list = (dislikesByBrand[brand] || []).slice(0, DISLIKES_IN_PROMPT);
 	if (!list.length) return "";
 	return `\nEl equipo RECHAZÓ estas opciones anteriores. No te parezcas a ellas (ni en estructura, ni en frases, ni en arranque):\n${list
-		.map((t) => `- ${t.replace(/\s+/g, " ").slice(0, 300)}`)
+		.map((d) => {
+			const why = [...(d.reasons || []).map(reasonLabel), d.comment].filter(Boolean).join("; ");
+			return `- ${d.text.replace(/\s+/g, " ").slice(0, 300)}${why ? ` (motivo: ${why.slice(0, 200)})` : ""}`;
+		})
 		.join("\n")}\n`;
+}
+
+// Resumen de lo que el equipo ha corregido (motivos más repetidos + comentarios recientes).
+function lessonsPrompt(brand) {
+	const lessons = lessonsByBrand[brand] || [];
+	if (!lessons.length) return "";
+	const counts = {};
+	for (const l of lessons) for (const r of l.reasons || []) counts[r] = (counts[r] || 0) + 1;
+	const top = Object.entries(counts)
+		.sort((a, b) => b[1] - a[1])
+		.slice(0, 4)
+		.map(([r, n]) => `${reasonLabel(r)} (${n})`);
+	const comments = lessons
+		.filter((l) => l.comment)
+		.slice(0, 5)
+		.map((l) => `- "${l.comment.replace(/\s+/g, " ").slice(0, 200)}"`);
+	if (!top.length && !comments.length) return "";
+	return `\nLo que el equipo ha corregido últimamente en los copys de Topito (tenlo muy en cuenta):${top.length ? `\n- Motivos más repetidos: ${top.join(", ")}.` : ""}${comments.length ? `\nComentarios recientes:\n${comments.join("\n")}` : ""}\n`;
 }
 
 function resolveBrand(req, res) {
@@ -796,7 +827,7 @@ function logUsage({ endpoint, provider, model, inputTokens, outputTokens }) {
 // (el usuario le dio "intentar de nuevo" sin calificarla, o navegó a otra opción).
 const FEEDBACK_LOG_PATH = path.join(__dirname, "feedback-log.jsonl");
 
-function logFeedback({ text, rating, source, brand, original, author, channel }) {
+function logFeedback({ text, rating, source, brand, original, author, channel, country, clientKey, reasons, comment }) {
 	const entry = {
 		timestamp: new Date().toISOString(),
 		brand,
@@ -810,7 +841,7 @@ function logFeedback({ text, rating, source, brand, original, author, channel })
 	} catch (err) {
 		console.error("No se pudo escribir el log de feedback:", err);
 	}
-	storage.logFeedback({ text, rating, source, brand, original, author, channel });
+	storage.logFeedback({ text, rating, source, brand, original, author, channel, country, clientKey, reasons, comment });
 }
 
 // Un "like" se guarda como nuevo ejemplo de tono para esa marca. No se usa de
@@ -986,7 +1017,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema a ${mode === "reescribir" ? "el texto que me pediste reescribir" : "lo que me pediste"}:
 
 ${reference.text}
-${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${dislikesPrompt(brand)}
+${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${lessonsPrompt(brand)}${dislikesPrompt(brand)}
 ${task}
 ${outputInstructions({ formatDef, angles })}
 `;
@@ -1137,15 +1168,53 @@ app.post("/generate", async (req, res) => {
 // "bad" cuando el usuario le da "intentar de nuevo" sin haber calificado ni
 // aplicado alguna de las opciones mostradas -- se asume que esas no sirvieron.
 // Guarda una calificación (log + tuning si es 👍). Usada por /feedback y por Slack.
-function saveFeedback({ text, rating, source, brand, original, author, channel }) {
-	logFeedback({ text, rating, source: source || "desconocido", brand, original, author, channel });
+function saveFeedback({ text, rating, source, brand, original, author, channel, country, clientKey, reasons, comment }) {
+	reasons = cleanReasons(reasons);
+	comment = String(comment || "").trim().slice(0, 1000);
+	logFeedback({ text, rating, source: source || "desconocido", brand, original, author, channel, country, clientKey, reasons, comment });
 	if (rating === "like") {
 		addLikedTextToTuning(brand, text);
 	}
 	if (rating === "bad" && String(source || "").endsWith("-explicito") && text) {
-		dislikesByBrand[brand] = [text, ...(dislikesByBrand[brand] || []).filter((t) => t !== text)].slice(0, DISLIKES_IN_PROMPT * 2);
+		dislikesByBrand[brand] = [{ text, reasons, comment }, ...(dislikesByBrand[brand] || []).filter((d) => d.text !== text)].slice(
+			0,
+			DISLIKES_IN_PROMPT * 2,
+		);
+	}
+	if ((rating === "bad" || rating === "neutral") && (reasons.length || comment)) {
+		(lessonsByBrand[brand] ||= []).unshift({ rating, text, reasons, comment, country });
 	}
 }
+
+// Motivo opcional que llega DESPUÉS de la calificación (modal de Slack / formulario del plugin).
+async function saveFeedbackDetail({ clientKey, author, brand, text, rating, reasons, comment }) {
+	reasons = cleanReasons(reasons);
+	comment = String(comment || "").trim().slice(0, 1000);
+	if (!clientKey || (!reasons.length && !comment)) return false;
+	await storage.updateFeedbackDetail({ clientKey, author, reasons, comment });
+	if (brand && BRANDS[brand]) {
+		(lessonsByBrand[brand] ||= []).unshift({ rating, text, reasons, comment });
+		const d = (dislikesByBrand[brand] || []).find((x) => x.text === text);
+		if (d) Object.assign(d, { reasons, comment });
+	}
+	return true;
+}
+
+// Motivo opcional de un ⚪/👎 ya enviado: { clientKey, reasons: ["largo",...], comment, text, rating }.
+app.post("/feedback/detail", async (req, res) => {
+	const session = requireAuth(req, res);
+	if (session === null) return;
+	const { clientKey, reasons, comment, text, rating } = req.body ?? {};
+	if (typeof clientKey !== "string" || !clientKey) return res.status(400).json({ error: "Falta clientKey." });
+	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
+	try {
+		const ok = await saveFeedbackDetail({ clientKey: clientKey.slice(0, 64), author: session.email, brand, text, rating, reasons, comment });
+		res.json({ ok });
+	} catch (err) {
+		console.error("[/feedback/detail] Error:", err.message);
+		res.status(500).json({ error: "No se pudo guardar el motivo." });
+	}
+});
 
 app.post("/feedback", (req, res) => {
 	const session = requireAuth(req, res);
@@ -1161,8 +1230,22 @@ app.post("/feedback", (req, res) => {
 
 	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
 
+	const { clientKey, reasons, comment, explicit, country } = req.body ?? {};
 	try {
-		saveFeedback({ text, rating, source, brand, original, author: session.email, channel: "figma" });
+		saveFeedback({
+			text,
+			rating,
+			// 👎 del botón (explícito) vs "bad" automático de pedir otra tanda.
+			source: rating === "bad" && explicit ? `${source || "desconocido"}-explicito` : source,
+			brand,
+			original,
+			author: session.email,
+			channel: "figma",
+			country: typeof country === "string" ? country.slice(0, 2) : null,
+			clientKey: typeof clientKey === "string" ? clientKey.slice(0, 64) : null,
+			reasons,
+			comment,
+		});
 		res.json({ ok: true });
 	} catch (err) {
 		console.error("[/feedback] Error:", err);
@@ -1399,6 +1482,8 @@ registerSlackRoutes(app, {
 	generateCore,
 	imageCopyCore,
 	saveFeedback,
+	saveFeedbackDetail,
+	FEEDBACK_REASONS,
 	computeUsageSummary,
 	computeFeedbackSummary,
 	storage,

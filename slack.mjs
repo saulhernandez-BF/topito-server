@@ -53,6 +53,8 @@ export function registerSlackRoutes(app, deps) {
 		generateCore,
 		imageCopyCore,
 		saveFeedback,
+		saveFeedbackDetail,
+		FEEDBACK_REASONS,
 		computeUsageSummary,
 		computeFeedbackSummary,
 		storage,
@@ -809,6 +811,18 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 					`${v.withPerformance ? `, ${v.withPerformance.toLocaleString("es-MX")} con desempeño real · ${v.topPerformers} ★` : ""})`,
 			)
 			.join("\n");
+		// Qué le corrigió el equipo a Topito esta semana (motivos de ⚪/👎).
+		const lessons = (await storage?.loadFeedbackLessons?.(7).catch(() => [])) || [];
+		const reasonCounts = {};
+		for (const l of lessons) for (const r of l.reasons || []) reasonCounts[r] = (reasonCounts[r] || 0) + 1;
+		const reasonLine = Object.entries(reasonCounts)
+			.sort((a, b) => b[1] - a[1])
+			.map(([r, n]) => `${FEEDBACK_REASONS[r] || r}: *${n}*`)
+			.join(" · ");
+		const commentLines = lessons
+			.filter((l) => l.comment)
+			.slice(0, 3)
+			.map((l) => `• “${esc(truncate(l.comment.replace(/\s+/g, " "), 160))}” — ${brandLabel(l.brand)}`);
 		// Copys de Topito que terminaron en anuncios, con su desempeño (score 0..1 = percentil).
 		const pub = topitoPublished ? topitoPublished() : null;
 		const pubLines = (pub?.matches || [])
@@ -829,6 +843,17 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 				],
 			},
 			{ type: "section", text: { type: "mrkdwn", text: `*Copys favoritos de la semana*\n${top.join("\n") || "_Aún no hay 👍 esta semana._"}` } },
+			...(reasonLine || commentLines.length
+				? [
+						{
+							type: "section",
+							text: {
+								type: "mrkdwn",
+								text: `*Lo que el equipo le corrigió a Topito*\n${[reasonLine, ...commentLines].filter(Boolean).join("\n")}`,
+							},
+						},
+					]
+				: []),
 			...(kbLine ? [{ type: "section", text: { type: "mrkdwn", text: `*Base de conocimiento*\n${kbLine}` } }] : []),
 			...(pub
 				? [
@@ -1049,6 +1074,45 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 		};
 	}
 
+	// Modal opcional "¿Qué le faltó?" después de ⚪ / 👎.
+	function feedbackDetailModal({ clientKey, rating, brand, text }) {
+		const options = Object.entries(FEEDBACK_REASONS).map(([value, label]) => ({ text: { type: "plain_text", text: label }, value }));
+		return {
+			type: "modal",
+			callback_id: "topito_feedback_detail",
+			private_metadata: JSON.stringify({ k: clientKey, r: rating, b: brand, t: truncate(text, 1500) }),
+			title: { type: "plain_text", text: rating === "bad" ? "¿Qué no funcionó?" : "¿Qué le faltó?" },
+			submit: { type: "plain_text", text: "Enviar" },
+			close: { type: "plain_text", text: "Omitir" },
+			blocks: [
+				{
+					type: "context",
+					elements: [{ type: "mrkdwn", text: `Opcional — ayuda a que Topito no lo repita.\n_${esc(truncate(text.replace(/\s+/g, " "), 220))}_` }],
+				},
+				{
+					type: "input",
+					block_id: "reasons",
+					optional: true,
+					label: { type: "plain_text", text: "Motivos" },
+					element: { type: "checkboxes", action_id: "v", options },
+				},
+				{
+					type: "input",
+					block_id: "comment",
+					optional: true,
+					label: { type: "plain_text", text: "Comentario" },
+					element: {
+						type: "plain_text_input",
+						action_id: "v",
+						multiline: true,
+						max_length: 1000,
+						placeholder: { type: "plain_text", text: "Ej. en Chile decimos #piti; le faltó mencionar el 2x1; muy formal…" },
+					},
+				},
+			],
+		};
+	}
+
 	// ---------------------------------------------------------------------------
 	// Pestaña Home de Topito (App Home)
 	// ---------------------------------------------------------------------------
@@ -1192,6 +1256,22 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			return processCopyRequest({ userId, channel: userId, action: "reescribir", text, brand, format });
 		}
 
+		if (payload.type === "view_submission" && payload.view?.callback_id === "topito_feedback_detail") {
+			const v = payload.view.state.values;
+			const meta = JSON.parse(payload.view.private_metadata || "{}");
+			const reasons = (v.reasons?.v?.selected_options || []).map((o) => o.value);
+			const comment = v.comment?.v?.value || "";
+			return saveFeedbackDetail({
+				clientKey: meta.k,
+				author: getUserEmail(userId),
+				brand: meta.b,
+				text: meta.t,
+				rating: meta.r,
+				reasons,
+				comment,
+			}).catch((err) => console.error("[slack] motivo de feedback:", err.message));
+		}
+
 		if (payload.type === "view_submission" && ["topito_crear_submit", "topito_ortografia_submit"].includes(payload.view?.callback_id)) {
 			const v = payload.view.state.values;
 			const action = payload.view.callback_id === "topito_crear_submit" ? "crear" : "ortografia";
@@ -1251,7 +1331,15 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 				const idx = act.action_id.split("_")[1];
 				// 👎 explícito: se marca para distinguirlo del "bad" automático (ver storage.loadDislikes).
 				const s = r === "bad" ? `${rawSource}-explicito` : rawSource;
-				saveFeedback({ text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
+				// ⚪/👎: se abre (primero, el trigger_id dura 3 s) un modal OPCIONAL para decir qué falló.
+				const clientKey = r === "like" ? null : crypto.randomUUID();
+				if (clientKey && payload.trigger_id) {
+					slack("views.open", {
+						trigger_id: payload.trigger_id,
+						view: feedbackDetailModal({ clientKey, rating: r, brand: BRANDS[b] ? b : DEFAULT_BRAND, text: t }),
+					}).catch((err) => console.error("[slack] modal de feedback:", err.details ?? err));
+				}
+				saveFeedback({ clientKey, text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
 				if (message?.blocks && payload.response_url) {
 					// Reemplazamos los botones de esa opción por la calificación.
 					const label = `${r === "like" ? "👍 Me encanta" : r === "bad" ? "👎 No va (Topito evitará algo así)" : "⚪ Sirve con ajustes"} — <@${userId}>`;

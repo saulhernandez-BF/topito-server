@@ -64,3 +64,12 @@ alter table feedback    enable row level security;
 alter table copy_bank   enable row level security;
 alter table slack_prefs enable row level security;
 alter table figma_inbox enable row level security;
+
+-- Fase 5 (2026-09-25): motivos de feedback (chips + comentario) y país.
+alter table feedback add column if not exists reasons text[];
+alter table feedback add column if not exists comment text;
+alter table feedback add column if not exists country text;      -- mx / co / cl
+alter table feedback add column if not exists client_key text;   -- para amarrar el motivo que llega después
+create index if not exists feedback_client_key_idx on feedback (client_key);
+alter table copy_bank add column if not exists country text;
+alter table figma_inbox add column if not exists country text;

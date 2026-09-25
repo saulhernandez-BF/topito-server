@@ -189,8 +189,22 @@ export function createStorage({ fetchWithTimeout }) {
 			]);
 		},
 
-		logFeedback({ text, rating, source, brand, original, author, channel }) {
-			insert("feedback", [{ brand, source, rating, text, original: original ?? null, author: author ?? null, channel: channel ?? null }]);
+		logFeedback({ text, rating, source, brand, original, author, channel, country, clientKey, reasons, comment }) {
+			insert("feedback", [
+				{
+					brand,
+					source,
+					rating,
+					text,
+					original: original ?? null,
+					author: author ?? null,
+					channel: channel ?? null,
+					country: country ?? null,
+					client_key: clientKey ?? null,
+					reasons: reasons?.length ? reasons : null,
+					comment: comment || null,
+				},
+			]);
 			if (rating === "like") {
 				insert(
 					"copy_bank",
@@ -281,9 +295,38 @@ export function createStorage({ fetchWithTimeout }) {
 		async loadDislikes(limit = 60) {
 			if (!dbEnabled) return [];
 			try {
-				return await sb(`feedback?select=brand,text&rating=eq.bad&source=like.*-explicito&order=id.desc&limit=${limit}`);
+				return await sb(
+					`feedback?select=brand,country,text,reasons,comment&rating=eq.bad&source=like.*-explicito&order=id.desc&limit=${limit}`,
+				);
 			} catch (err) {
 				console.error("[storage] No se pudieron leer los 👎:", err.message);
+				return [];
+			}
+		},
+
+		// Motivo opcional (chips + comentario) de un ⚪/👎 ya guardado. Se amarra por
+		// client_key y por autor: nadie puede editar la calificación de otra persona.
+		async updateFeedbackDetail({ clientKey, author, reasons, comment }) {
+			if (!dbEnabled || !clientKey) return false;
+			const q = `feedback?client_key=eq.${encodeURIComponent(clientKey)}${author ? `&author=eq.${encodeURIComponent(author)}` : ""}`;
+			await sb(q, {
+				method: "PATCH",
+				body: { reasons: reasons?.length ? reasons : null, comment: comment || null },
+				prefer: "return=minimal",
+			});
+			return true;
+		},
+
+		// ⚪/👎 con motivo de los últimos N días: de aquí sale "lo que el equipo ha corregido".
+		async loadFeedbackLessons(days = 45) {
+			if (!dbEnabled) return [];
+			const since = new Date(Date.now() - days * 864e5).toISOString();
+			try {
+				return await sb(
+					`feedback?select=brand,country,rating,text,reasons,comment,created_at&rating=in.(neutral,bad)&or=(reasons.not.is.null,comment.not.is.null)&created_at=gte.${since}&order=id.desc&limit=500`,
+				);
+			} catch (err) {
+				console.error("[storage] No se pudieron leer los motivos de feedback:", err.message);
 				return [];
 			}
 		},
