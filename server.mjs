@@ -1567,6 +1567,103 @@ app.post("/sheets/copy", async (req, res) => {
 	}
 });
 
+// --- Complemento de Google Docs / Sheets (addon/) ---
+// El complemento (Apps Script, instalado para el dominio) guarda el mismo secreto
+// interno en sus Script Properties y manda el correo de quien lo usa.
+const ADDON_ALLOWED_EMAIL = (email) => typeof email === "string" && email.toLowerCase().endsWith(`@${ALLOWED_EMAIL_DOMAIN}`);
+
+app.post("/addon/copy", async (req, res) => {
+	if (!requireInternalSecret(req, res)) return;
+	const { action = "crear", text, brand: rawBrand, format: rawFormat, user, surface } = req.body ?? {};
+	// Desde una fórmula =TOPITO() Google no siempre da el correo; se acepta vacío solo ahí.
+	if (!(ADDON_ALLOWED_EMAIL(user) || (surface === "formula" && !user))) {
+		return res.status(403).json({ error: `Topito solo está disponible para cuentas @${ALLOWED_EMAIL_DOMAIN}.` });
+	}
+	if (typeof text !== "string" || !text.trim()) return res.status(400).json({ error: "Falta el texto." });
+	const brand = BRANDS[rawBrand] ? rawBrand : DEFAULT_BRAND;
+	const format = resolveFormat(rawFormat);
+	const country = resolveCountry(req.body?.country);
+	const prompt = text.slice(0, 6000);
+	try {
+		if (action === "ortografia") {
+			const corrected = await ortografiaCore({ prompt, brand });
+			return res.json({ action, options: [{ text: corrected, ok: true }] });
+		}
+		if (action === "tropicalizar") {
+			const out = await tropicalizeCore({ text: prompt, brand, countries: country === "mx" ? ["co", "cl"] : [country] });
+			return res.json({
+				action,
+				options: out.versions.map((v) => ({
+					text: v.text,
+					label: `${v.flag} ${v.label}`,
+					country: v.country,
+					warnings: [...v.tropical.map((x) => `“${x.term}” → “${x.replacement}”`), ...v.glossary.map((w) => `glosario: “${w}”`)],
+					ok: !v.tropical.length && !v.glossary.length,
+				})),
+			});
+		}
+		const result = action === "reescribir"
+			? await reescribirCore({ prompt, brand, format, country })
+			: await generateCore({ prompt, brand, format, country });
+		res.json({
+			action,
+			country,
+			references: result.references,
+			options: result.options.map((o) => ({
+				text: o.text,
+				label: o.angleLabel || "",
+				fields: o.fields,
+				ok: o.ok,
+				warnings: [
+					...(o.fields || []).filter((f) => !f.ok).map((f) => `${f.label}: ${f.length}/${f.max || f.firstLineMax} caracteres`),
+					...storage.glossaryViolations(brand, o.text).map((w) => `glosario: “${w}”`),
+					...(o.tropical || []).map((x) => `“${x.term}” → “${x.replacement}”`),
+				],
+			})),
+		});
+	} catch (err) {
+		respondWithError(res, err, "/addon/copy");
+	}
+});
+
+app.post("/addon/feedback", async (req, res) => {
+	if (!requireInternalSecret(req, res)) return;
+	const { text, rating, source, user, clientKey, reasons, comment, detailOnly, surface } = req.body ?? {};
+	if (!ADDON_ALLOWED_EMAIL(user)) return res.status(403).json({ error: "Cuenta no permitida." });
+	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
+	try {
+		if (detailOnly) {
+			const ok = await saveFeedbackDetail({ clientKey, author: user, brand, text, rating, reasons, comment });
+			return res.json({ ok });
+		}
+		if (!["like", "neutral", "bad"].includes(rating) || !String(text || "").trim()) return res.status(400).json({ error: "Faltan datos." });
+		saveFeedback({
+			text,
+			rating,
+			source: rating === "bad" ? `${source || "addon"}-explicito` : source || "addon",
+			brand,
+			author: user,
+			channel: surface === "docs" ? "docs" : "sheets",
+			country: resolveCountry(req.body?.country),
+			clientKey: typeof clientKey === "string" ? clientKey.slice(0, 64) : null,
+			reasons,
+			comment,
+		});
+		res.json({ ok: true });
+	} catch (err) {
+		res.status(500).json({ error: err.message });
+	}
+});
+
+app.get("/addon/meta", (req, res) => {
+	res.json({
+		brands: Object.entries(BRANDS).map(([key, b]) => ({ key, label: b.label })),
+		countries: Object.entries(COUNTRIES).map(([key, c]) => ({ key, label: c.label, flag: c.flag })),
+		formats: Object.entries(FORMATS).map(([key, f]) => ({ key, label: f.label })),
+		reasons: Object.entries(FEEDBACK_REASONS).map(([key, label]) => ({ key, label })),
+	});
+});
+
 // --- Bot de Slack (asistente de copy) ---
 // Se activa solo si SLACK_BOT_TOKEN y SLACK_SIGNING_SECRET están configurados;
 // si no, estas rutas responden 503 y el resto del server sigue igual.

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top" />
+    <style>
+      :root { --ink: #1d1d1b; --soft: #6b6b66; --line: #dcdcd6; --bg: #ffffff; --accent: #1d1d1b; --ok: #3f6c51; --warn: #9a5b12; --bad: #8a3b3b; }
+      * { box-sizing: border-box; }
+      body { font-family: Arial, Helvetica, sans-serif; color: var(--ink); background: var(--bg); margin: 0; padding: 12px; font-size: 13px; }
+      h1 { font-size: 16px; margin: 0 0 2px; }
+      .sub { color: var(--soft); font-size: 12px; margin-bottom: 10px; }
+      .tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+      .tab { padding: 5px 9px; border: 1px solid var(--line); border-radius: 100px; cursor: pointer; font-size: 12px; }
+      .tab.on { background: var(--ink); color: #fff; border-color: var(--ink); }
+      label { display: block; font-size: 11px; color: var(--soft); margin: 8px 0 3px; }
+      select, textarea { width: 100%; font: inherit; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; background: #fff; color: var(--ink); }
+      textarea { min-height: 84px; resize: vertical; }
+      .row { display: flex; gap: 6px; }
+      .row > div { flex: 1; }
+      .btn { display: inline-block; padding: 7px 12px; border-radius: 100px; border: 1px solid var(--ink); cursor: pointer; font-size: 12px; background: #fff; user-select: none; }
+      .btn.primary { background: var(--ink); color: #fff; font-weight: 700; }
+      .btn.small { padding: 3px 9px; font-size: 11px; border-color: var(--line); }
+      .btn[disabled] { opacity: .4; pointer-events: none; }
+      .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+      .link { color: var(--soft); font-size: 11px; cursor: pointer; text-decoration: underline; }
+      .msg { font-size: 12px; margin-top: 8px; color: var(--soft); }
+      .msg.err { color: var(--bad); }
+      .card { border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; margin-top: 10px; }
+      .card .lab { font-size: 11px; color: var(--soft); margin-bottom: 4px; }
+      .card .txt { white-space: pre-wrap; line-height: 1.35; }
+      .card .warn { font-size: 11px; color: var(--warn); margin-top: 4px; }
+      .card .bar { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; align-items: center; }
+      .rate { width: 26px; height: 26px; border-radius: 100px; border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 13px; }
+      .rate.on { border-color: var(--ink); background: #f1f1ec; }
+      .detail { display: none; margin-top: 8px; }
+      .detail.show { display: block; }
+      .chips { display: flex; gap: 4px; flex-wrap: wrap; margin: 4px 0 6px; }
+      .chip { font-size: 11px; padding: 3px 8px; border-radius: 100px; border: 1px solid var(--line); cursor: pointer; }
+      .chip.on { border-color: var(--ink); background: #f1f1ec; }
+      .refs { font-size: 11px; color: var(--soft); margin-top: 8px; }
+      .spacer { flex: 1; }
+    </style>
+  </head>
+  <body>
+    <h1>✍️ Topito</h1>
+    <div class="sub">Copy con el tono de la marca · mismo motor que Slack y Figma</div>
+
+    <div class="tabs" id="tabs">
+      <span class="tab" data-a="crear">✍️ Crear</span>
+      <span class="tab" data-a="reescribir">🔁 Reescribir</span>
+      <span class="tab" data-a="ortografia">🔤 Ortografía</span>
+      <span class="tab" data-a="tropicalizar">🌎 Tropicalizar</span>
+    </div>
+
+    <div class="row">
+      <div><label>Marca</label><select id="brand"></select></div>
+      <div id="countryBox"><label>País</label><select id="country"></select></div>
+    </div>
+    <div id="formatBox"><label>Formato</label><select id="format"></select></div>
+
+    <label id="textLabel">¿Qué necesitas?</label>
+    <textarea id="text" placeholder=""></textarea>
+    <div class="actions">
+      <span class="btn primary" id="go">Generar</span>
+      <span class="link" id="useSel">Usar selección</span>
+      <span class="spacer"></span>
+      <span class="btn small" id="cells" style="display:none" title="Procesa cada celda seleccionada y escribe el resultado a la derecha">Cada celda →</span>
+    </div>
+    <div class="msg" id="msg"></div>
+    <div id="results"></div>
+
+    <script>
+      var INITIAL = <?!= initial ?>;
+      var META = { brands: [], countries: [], formats: [], reasons: [] };
+      var state = { action: INITIAL.action || 'crear', host: INITIAL.host };
+      var $ = function (id) { return document.getElementById(id); };
+
+      function msg(t, err) { $('msg').textContent = t || ''; $('msg').className = 'msg' + (err ? ' err' : ''); }
+      function busy(on) { ['go', 'cells'].forEach(function (id) { if (on) $(id).setAttribute('disabled', ''); else $(id).removeAttribute('disabled'); }); }
+      function fill(sel, items, fmt) { sel.innerHTML = items.map(function (i) { return '<option value="' + i.key + '">' + fmt(i) + '</option>'; }).join(''); }
+      function key() { try { return crypto.randomUUID(); } catch (e) { return 'fb-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9); } }
+
+      var LABELS = {
+        crear: ['¿Qué necesitas?', 'Ej. 4 captions para la colección de otoño, tono divertido, mencionar 2x1', 'Generar'],
+        reescribir: ['Texto a reescribir', 'Selecciona texto en el documento o pégalo aquí', 'Reescribir'],
+        ortografia: ['Texto a revisar', 'Selecciona texto en el documento o pégalo aquí', 'Revisar'],
+        tropicalizar: ['Copy de México', 'Selecciona el copy mexicano o pégalo aquí', 'Tropicalizar'],
+      };
+
+      function setAction(a) {
+        state.action = a;
+        document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('on', t.dataset.a === a); });
+        $('textLabel').textContent = LABELS[a][0];
+        $('text').placeholder = LABELS[a][1];
+        $('go').textContent = LABELS[a][2];
+        $('formatBox').style.display = a === 'crear' || a === 'reescribir' ? '' : 'none';
+        $('countryBox').style.display = a === 'ortografia' ? 'none' : '';
+        $('cells').style.display = state.host === 'sheets' && a !== 'crear' ? '' : 'none';
+        if (a !== 'crear' && !$('text').value.trim()) useSelection();
+      }
+
+      function useSelection() {
+        google.script.run.withSuccessHandler(function (t) {
+          if (t) { $('text').value = t; msg(''); } else if (state.action !== 'crear') msg('Selecciona texto en el ' + (state.host === 'docs' ? 'documento' : 'Sheet') + ' o pégalo aquí.');
+        }).leerSeleccion();
+      }
+
+      function savePrefs() {
+        google.script.run.guardarPrefs({ brand: $('brand').value, country: $('country').value, format: $('format').value });
+      }
+
+      function req() {
+        var country = $('country').value;
+        // Tropicalizar desde "México" = ambos países.
+        return { action: state.action, text: $('text').value, brand: $('brand').value, format: $('format').value, country: country };
+      }
+
+      function go() {
+        var r = req();
+        if (!r.text.trim()) return msg(state.action === 'crear' ? 'Escribe qué necesitas.' : 'No hay texto: selecciona o pega uno.', true);
+        busy(true); msg('✍️ Topito está escribiendo…'); $('results').innerHTML = '';
+        google.script.run
+          .withSuccessHandler(function (data) { busy(false); msg(''); render(data, r); })
+          .withFailureHandler(function (e) { busy(false); msg('😕 ' + (e.message || e), true); })
+          .pedirCopy(r);
+      }
+
+      function cells() {
+        var r = req();
+        busy(true); msg('⏳ Procesando celdas…');
+        google.script.run
+          .withSuccessHandler(function (o) { busy(false); msg('✅ ' + o.hechas + ' celda(s) listas' + (o.pendientes ? ' — selecciona las que faltan y vuelve a correrlo.' : '.')); })
+          .withFailureHandler(function (e) { busy(false); msg('😕 ' + (e.message || e), true); })
+          .procesarCeldas(r);
+      }
+
+      function render(data, r) {
+        var box = $('results');
+        (data.options || []).forEach(function (o, i) {
+          var card = document.createElement('div');
+          card.className = 'card';
+          var lab = o.label || (r.action === 'ortografia' ? 'Texto corregido' : 'Opción ' + (i + 1));
+          card.innerHTML =
+            '<div class="lab"></div><div class="txt"></div>' +
+            (o.warnings && o.warnings.length ? '<div class="warn"></div>' : '') +
+            '<div class="bar">' +
+            '<span class="btn small" data-do="replace">Reemplazar selección</span>' +
+            '<span class="btn small" data-do="insert">' + (state.host === 'docs' ? 'Insertar' : 'A la derecha') + '</span>' +
+            '<span class="btn small" data-do="copy">Copiar</span>' +
+            '<span class="spacer"></span>' +
+            (r.action === 'ortografia' ? '' : '<span class="rate" data-r="like" title="Me encanta">👍</span><span class="rate" data-r="neutral" title="Sirve con ajustes">⚪</span><span class="rate" data-r="bad" title="No va">👎</span>') +
+            '</div>' +
+            '<div class="detail"><div class="lab">Opcional: ¿qué le faltó?</div><div class="chips"></div><textarea placeholder="Comentario (ej. en Chile decimos #piti, le faltó el 2x1…)" style="min-height:44px"></textarea><div class="actions"><span class="btn small primary" data-do="send">Enviar</span><span class="link" data-do="skip">Omitir</span></div></div>';
+          card.querySelector('.lab').textContent = lab;
+          card.querySelector('.txt').textContent = o.text;
+          if (o.warnings && o.warnings.length) card.querySelector('.warn').textContent = '⚠️ ' + o.warnings.join(' · ');
+          var fb = { text: o.text, brand: r.brand, country: o.country || r.country, source: r.action };
+          card.addEventListener('click', function (ev) {
+            var t = ev.target;
+            if (t.dataset.do === 'replace') google.script.run.withSuccessHandler(function () { msg('✅ Listo'); }).reemplazarSeleccion(o.text);
+            if (t.dataset.do === 'insert') google.script.run.withSuccessHandler(function () { msg('✅ Insertado'); }).insertarTexto(o.text);
+            if (t.dataset.do === 'copy') copy(o.text);
+            if (t.dataset.r) rate(card, fb, t.dataset.r);
+            if (t.classList.contains('chip')) t.classList.toggle('on');
+            if (t.dataset.do === 'send') sendDetail(card, fb);
+            if (t.dataset.do === 'skip') card.querySelector('.detail').classList.remove('show');
+          });
+          box.appendChild(card);
+        });
+        if (data.references && data.references.count) {
+          var refs = document.createElement('div');
+          refs.className = 'refs';
+          refs.textContent = '📚 Inspirado en ' + data.references.count + ' ejemplos reales' + (data.references.topPerformers ? ' (' + data.references.topPerformers + ' ★ de los que mejor funcionaron)' : '');
+          box.appendChild(refs);
+        }
+      }
+
+      function rate(card, fb, rating) {
+        card.querySelectorAll('.rate').forEach(function (x) { x.classList.toggle('on', x.dataset.r === rating); });
+        fb.rating = rating;
+        fb.clientKey = rating === 'like' ? null : key();
+        google.script.run.mandarFeedback({ text: fb.text, rating: rating, brand: fb.brand, country: fb.country, source: fb.source, clientKey: fb.clientKey });
+        var d = card.querySelector('.detail');
+        if (rating === 'like') { d.classList.remove('show'); msg('👍 ¡Gracias! Topito aprende de esto.'); return; }
+        d.querySelector('.lab').textContent = rating === 'bad' ? 'Opcional: ¿qué no funcionó?' : 'Opcional: ¿qué le faltó?';
+        d.querySelector('.chips').innerHTML = META.reasons.map(function (x) { return '<span class="chip" data-k="' + x.key + '">' + x.label + '</span>'; }).join('');
+        d.querySelector('textarea').value = '';
+        d.classList.add('show');
+      }
+
+      function sendDetail(card, fb) {
+        var d = card.querySelector('.detail');
+        var reasons = [].map.call(d.querySelectorAll('.chip.on'), function (c) { return c.dataset.k; });
+        var comment = d.querySelector('textarea').value.trim();
+        d.classList.remove('show');
+        if (!reasons.length && !comment) return;
+        google.script.run.withSuccessHandler(function () { msg('🙏 Gracias, Topito lo tomará en cuenta.'); })
+          .mandarFeedback({ detailOnly: true, clientKey: fb.clientKey, text: fb.text, rating: fb.rating, brand: fb.brand, reasons: reasons, comment: comment });
+      }
+
+      function copy(t) {
+        var ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); msg('📋 Copiado'); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+
+      // Arranque
+      document.querySelectorAll('.tab').forEach(function (t) { t.onclick = function () { setAction(t.dataset.a); }; });
+      $('go').onclick = go;
+      $('cells').onclick = cells;
+      $('useSel').onclick = useSelection;
+      ['brand', 'country', 'format'].forEach(function (id) { $(id).onchange = savePrefs; });
+
+      google.script.run.withSuccessHandler(function (meta) {
+        META = meta;
+        fill($('brand'), meta.brands, function (b) { return b.label; });
+        fill($('country'), meta.countries, function (c) { return c.flag + ' ' + c.label; });
+        fill($('format'), meta.formats, function (f) { return f.label; });
+        google.script.run.withSuccessHandler(function (p) {
+          if (p.brand) $('brand').value = p.brand;
+          if (p.country) $('country').value = p.country;
+          if (p.format) $('format').value = p.format;
+          setAction(state.action);
+        }).leerPrefs();
+      }).withFailureHandler(function (e) { msg('😕 No pude conectar con Topito: ' + (e.message || e), true); setAction(state.action); }).metaTopito();
+    </script>
+  </body>
+</html>
