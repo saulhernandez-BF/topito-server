@@ -73,3 +73,4 @@ alter table feedback add column if not exists client_key text;   -- para amarrar
 create index if not exists feedback_client_key_idx on feedback (client_key);
 alter table copy_bank add column if not exists country text;
 alter table figma_inbox add column if not exists country text;
+alter table slack_prefs add column if not exists country text;

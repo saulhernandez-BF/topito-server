@@ -52,6 +52,8 @@ export function registerSlackRoutes(app, deps) {
 		reescribirCore,
 		generateCore,
 		imageCopyCore,
+		tropicalizeCore,
+		COUNTRIES,
 		saveFeedback,
 		saveFeedbackDetail,
 		FEEDBACK_REASONS,
@@ -157,10 +159,22 @@ export function registerSlackRoutes(app, deps) {
 		if (fromDb) prefs = { ...prefs, ...fromDb };
 	});
 	const getBrand = (userId) => (BRANDS[prefs[userId]?.brand] ? prefs[userId].brand : DEFAULT_BRAND);
+	// País por defecto (mx / co / cl): se elige en la pestaña Home.
+	const getCountry = (userId) => (COUNTRIES?.[prefs[userId]?.country] ? prefs[userId].country : "mx");
+	const countryTag = (c) => (COUNTRIES?.[c] ? `${COUNTRIES[c].flag} ${COUNTRIES[c].label}` : "🇲🇽 México");
+	function setCountry(userId, country) {
+		if (!COUNTRIES?.[country] || getCountry(userId) === country) return;
+		prefs[userId] = { ...(prefs[userId] || {}), country };
+		storage?.saveSlackPref?.(userId, getBrand(userId), country);
+		try {
+			fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true });
+			fs.writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2));
+		} catch {}
+	}
 	function setBrand(userId, brand) {
 		if (!BRANDS[brand] || prefs[userId]?.brand === brand) return;
 		prefs[userId] = { ...(prefs[userId] || {}), brand };
-		storage?.saveSlackPref?.(userId, brand);
+		storage?.saveSlackPref?.(userId, brand, prefs[userId]?.country);
 		try {
 			fs.mkdirSync(path.dirname(PREFS_PATH), { recursive: true });
 			fs.writeFileSync(PREFS_PATH, JSON.stringify(prefs, null, 2));
@@ -237,9 +251,9 @@ export function registerSlackRoutes(app, deps) {
 			properties: {
 				action: {
 					type: "string",
-					enum: ["crear", "reescribir", "ortografia", "lote", "reporte_uso", "ayuda", "responder"],
+					enum: ["crear", "reescribir", "ortografia", "tropicalizar", "lote", "reporte_uso", "ayuda", "responder"],
 					description:
-						"crear = generar copy nuevo desde una instrucción o brief (también para ajustar/iterar un copy anterior: 'más corto', 'con emoji'); reescribir = el usuario da un texto existente y quiere que se reescriba con el tono de la marca; ortografia = corregir solo ortografía/tildes de un texto; lote = el mensaje trae el contenido de un documento con una LISTA de copies ya escritos que hay que entonar/reescribir uno por uno (usa el campo items); reporte_uso = costos/uso/calificaciones del servicio; ayuda = qué puede hacer Topito; responder = cualquier otra cosa (saludo, pregunta corta).",
+						"crear = generar copy nuevo desde una instrucción o brief (también para ajustar/iterar un copy anterior: 'más corto', 'con emoji'); reescribir = el usuario da un texto existente y quiere que se reescriba con el tono de la marca; ortografia = corregir solo ortografía/tildes de un texto; lote = el mensaje trae el contenido de un documento con una LISTA de copies ya escritos que hay que entonar/reescribir uno por uno (usa el campo items); tropicalizar = adaptar un copy ya escrito (mexicano) a Colombia y/o Chile ('tropicaliza', 'versión para Chile de este copy') — pon el copy en text; reporte_uso = costos/uso/calificaciones del servicio; ayuda = qué puede hacer Topito; responder = cualquier otra cosa (saludo, pregunta corta).",
 				},
 				text: {
 					type: "string",
@@ -250,6 +264,12 @@ export function registerSlackRoutes(app, deps) {
 					type: "string",
 					enum: Object.keys(BRANDS),
 					description: "Marca. Solo si el usuario la menciona o el hilo la deja clara; si no, omítela.",
+				},
+				country: {
+					type: "string",
+					enum: ["mx", "co", "cl"],
+					description:
+						"País de destino del copy: mx = México, co = Colombia, cl = Chile. Solo si el usuario lo menciona (\"para Chile\", \"Colombia\"); si no, omítelo. En tropicalizar sin país explícito, omítelo (se hacen ambos).",
 				},
 				format: {
 					type: "string",
@@ -323,14 +343,14 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 	// Ejecución de acciones (reusa la lógica del plugin)
 	// ---------------------------------------------------------------------------
 
-	async function runCopyAction({ action, text, brand, format }) {
+	async function runCopyAction({ action, text, brand, format, country = "mx" }) {
 		if (action === "ortografia") {
 			return { corrected: await ortografiaCore({ prompt: text, brand }) };
 		}
 		const result =
 			action === "reescribir"
-				? await reescribirCore({ prompt: text, brand, format })
-				: await generateCore({ prompt: text, brand, format });
+				? await reescribirCore({ prompt: text, brand, format, country })
+				: await generateCore({ prompt: text, brand, format, country });
 		return { options: result.options, references: result.references };
 	}
 
@@ -371,12 +391,12 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 		return `📚 Inspirado en ${refs.count} ${kind} de ${brandLabel(brand)}${winners}${top}`;
 	}
 
-	function resultBlocks({ action, brand, format, options, references, corrected, original, prompt, image }) {
+	function resultBlocks({ action, brand, format, options, references, corrected, original, prompt, image, country = "mx" }) {
 		const blocks = [];
 		const meta =
 			action === "ortografia"
 				? `${ACTION_LABELS.ortografia} · ${brandLabel(brand)}`
-				: `${image ? "🖼️ Desde imagen" : ACTION_LABELS[action]} · ${brandLabel(brand)} · ${formatLabel(format)}`;
+				: `${image ? "🖼️ Desde imagen" : ACTION_LABELS[action]} · ${brandLabel(brand)} · ${formatLabel(format)}${country !== "mx" ? ` · ${countryTag(country)}` : ""}`;
 		blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: meta }] });
 		if (image) {
 			const kind = image.tipo === "referencia" ? "una *referencia* (otra marca) — la adapté a nuestro tono" : "una *pieza de la marca* — escribí el copy que la acompaña";
@@ -420,9 +440,10 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 			if (limits) notes.push(limits);
 			const banned = storage?.glossaryViolations?.(brand, opt.text) || [];
 			if (banned.length) notes.push(`⚠️ Glosario: ${banned.map((w) => `“${esc(w)}”`).join(", ")}`);
+			if (opt.tropical?.length) notes.push(`⚠️ ${countryTag(country)}: ${opt.tropical.map((v) => `“${esc(v.term)}” → “${esc(v.replacement)}”`).join(", ")}`);
 			if (notes.length) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: notes.join("   ") }] });
 			const val = (rating) =>
-				JSON.stringify({ r: rating, b: brand, s: action === "reescribir" ? "reescribir" : "crear", t: truncate(opt.text, 1800) });
+				JSON.stringify({ r: rating, b: brand, c: country, s: action === "reescribir" ? "reescribir" : "crear", t: truncate(opt.text, 1800) });
 			blocks.push({
 				type: "actions",
 				block_id: `rate_${i}`,
@@ -436,12 +457,22 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 						text: { type: "plain_text", text: "📤 A Figma", emoji: true },
 						value: JSON.stringify({ b: brand, f: format, t: truncate(opt.text, 1800) }),
 					},
+					...(country === "mx"
+						? [
+								{
+									type: "button",
+									action_id: `tropical_${i}`,
+									text: { type: "plain_text", text: "🌎 Tropicalizar", emoji: true },
+									value: JSON.stringify({ b: brand, t: truncate(opt.text, 1800) }),
+								},
+							]
+						: []),
 				],
 			});
 		});
 
 		// Botones finales: otra tanda y cambiar de marca (re-ejecutan la misma petición).
-		const base = { a: action, f: format, p: truncate(prompt, 1500) };
+		const base = { a: action, f: format, c: country, p: truncate(prompt, 1500) };
 		const other = Object.keys(BRANDS).find((b) => b !== brand);
 		const retry = [
 			{
@@ -514,7 +545,8 @@ Si el mensaje incluye "[Contenido del documento]": si es una lista de copies ya 
 También puedes usar el menú ⋯ de cualquier mensaje → *Reescribir con Topito* o *Revisar ortografía*, o reaccionar con 🔤 (ortografía) o 🔁 (reescribir).
 Pega un link de Google Docs/Sheets con un brief o una lista de copies y los trabajo. Con *📤 A Figma* la opción llega a tu plugin.
 Mándame una *imagen* (pieza casi final o referencia de otra marca) y te propongo el copy; si es nuestra, también reviso sus textos.
-Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.`;
+Para *Colombia o Chile* dime "para Chile" / "para Colombia", elige tu país en mi pestaña Inicio, o usa *🌎 Tropicalizar* en cualquier opción.
+Califica las opciones con 👍 / ⚪ / 👎 (y si quieres, dime qué falló) — así aprendo el tono del equipo.`;
 
 	// ---------------------------------------------------------------------------
 	// "Respondedor": publica un placeholder y luego lo reemplaza con el resultado
@@ -608,11 +640,13 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 				format = "caption"; // imagen sola: lo más común es el caption del post
 			}
 			const image = await downloadSlackImage(file);
-			const result = await imageCopyCore({ image, note, brand, format });
+			const country = getCountry(userId);
+			const result = await imageCopyCore({ image, note, brand, format, country });
 			const payload = {
 				action: "crear", // "Otra tanda" re-usa el prompt ya armado (sin volver a mandar la imagen)
 				brand,
 				format,
+				country,
 				original: note,
 				prompt: result.prompt,
 				options: result.options,
@@ -628,14 +662,62 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 		}
 	}
 
-	async function processCopyRequest({ userId, channel, thread_ts, action, text, brand, format }) {
+	// 🌎 Tropicalizar: un copy mexicano → versiones para Colombia y/o Chile.
+	async function processTropicalRequest({ userId, channel, thread_ts, text, brand, countries = ["co", "cl"] }) {
 		const reply = await startReply({ channel, thread_ts });
 		if (!checkRateLimit(userId)) {
 			return reply.update(`🚦 Llegaste al límite de ${RATE_LIMIT} peticiones cada 10 minutos. Intenta en un rato.`);
 		}
 		try {
-			const result = await runCopyAction({ action, text, brand, format });
-			const payload = { action, brand, format, original: text, prompt: text, ...result };
+			const out = await tropicalizeCore({ text, brand, countries });
+			const blocks = [
+				{ type: "context", elements: [{ type: "mrkdwn", text: `🌎 Tropicalizar · ${brandLabel(brand)}` }] },
+				{ type: "context", elements: [{ type: "mrkdwn", text: `*🇲🇽 Original:* ${esc(truncate(text.replace(/\s+/g, " "), 400))}` }] },
+			];
+			out.versions.forEach((v, i) => {
+				blocks.push({ type: "divider" });
+				blocks.push({ type: "section", text: { type: "mrkdwn", text: `*${v.flag} ${v.label}*\n${esc(truncate(v.text, 2800))}` } });
+				const notes = [];
+				if (v.tropical.length) notes.push(`⚠️ Se coló: ${v.tropical.map((x) => `“${esc(x.term)}” → “${esc(x.replacement)}”`).join(", ")}`);
+				if (v.glossary.length) notes.push(`⚠️ Glosario: ${v.glossary.map((w) => `“${esc(w)}”`).join(", ")}`);
+				if (notes.length) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: notes.join("   ") }] });
+				const val = (rating) => JSON.stringify({ r: rating, b: brand, c: v.country, s: "tropicalizar", t: truncate(v.text, 1800) });
+				blocks.push({
+					type: "actions",
+					block_id: `rate_t${i}`,
+					elements: [
+						{ type: "button", action_id: `like_t${i}`, text: { type: "plain_text", text: "👍 Me encanta", emoji: true }, value: val("like") },
+						{ type: "button", action_id: `neutral_t${i}`, text: { type: "plain_text", text: "⚪ Sirve con ajustes", emoji: true }, value: val("neutral") },
+						{ type: "button", action_id: `dislike_t${i}`, text: { type: "plain_text", text: "👎 No va", emoji: true }, value: val("bad") },
+						{
+							type: "button",
+							action_id: `figma_${i}`,
+							text: { type: "plain_text", text: "📤 A Figma", emoji: true },
+							value: JSON.stringify({ b: brand, f: "general", t: truncate(v.text, 1800) }),
+						},
+					],
+				});
+			});
+			blocks.push({
+				type: "context",
+				elements: [{ type: "mrkdwn", text: "Las reglas por país salen de la pestaña *Tropicalización* del Sheet de Topito (ej. #cuatroojos → #piti)." }],
+			});
+			await reply.update(out.versions.map((v) => `${v.flag} ${v.label}: ${v.text}`).join("\n"), blocks);
+		} catch (err) {
+			console.error("[slack] Error en processTropicalRequest:", err.details ?? err);
+			await reply.update(friendlyError(err));
+		}
+	}
+
+	async function processCopyRequest({ userId, channel, thread_ts, action, text, brand, format, country }) {
+		country = COUNTRIES?.[country] ? country : getCountry(userId);
+		const reply = await startReply({ channel, thread_ts });
+		if (!checkRateLimit(userId)) {
+			return reply.update(`🚦 Llegaste al límite de ${RATE_LIMIT} peticiones cada 10 minutos. Intenta en un rato.`);
+		}
+		try {
+			const result = await runCopyAction({ action, text, brand, format, country });
+			const payload = { action, brand, format, country, original: text, prompt: text, ...result };
 			await reply.update(fallbackText(payload), resultBlocks(payload));
 		} catch (err) {
 			console.error("[slack] Error en processCopyRequest:", err.details ?? err);
@@ -667,7 +749,7 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 	const DOC_URL_RE = /https:\/\/docs\.google\.com\/(?:document|spreadsheets)\/d\/[\w-]+[^\s|>]*/;
 	const MAX_LOTE = 10;
 
-	async function processLote({ userId, channel, thread_ts, items, brand, format }) {
+	async function processLote({ userId, channel, thread_ts, items, brand, format, country = "mx" }) {
 		const reply = await startReply({ channel, thread_ts });
 		const list = items.map((t) => String(t || "").trim()).filter(Boolean);
 		const truncatedNote = list.length > MAX_LOTE ? `\n_(Tomé los primeros ${MAX_LOTE} de ${list.length}.)_` : "";
@@ -681,12 +763,17 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			const results = [];
 			for (let i = 0; i < work.length; i += 3) {
 				const chunk = work.slice(i, i + 3);
-				results.push(...(await Promise.all(chunk.map((text) => reescribirCore({ prompt: text, brand, format }).catch(() => null)))));
+				results.push(...(await Promise.all(chunk.map((text) => reescribirCore({ prompt: text, brand, format, country }).catch(() => null)))));
 			}
 			const blocks = [
 				{
 					type: "context",
-					elements: [{ type: "mrkdwn", text: `🔁 Lote · ${brandLabel(brand)} · ${formatLabel(format)} · ${work.length} copies${truncatedNote}` }],
+					elements: [
+						{
+							type: "mrkdwn",
+							text: `🔁 Lote · ${brandLabel(brand)} · ${formatLabel(format)}${country !== "mx" ? ` · ${countryTag(country)}` : ""} · ${work.length} copies${truncatedNote}`,
+						},
+					],
 				},
 			];
 			work.forEach((original, n) => {
@@ -954,15 +1041,22 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 		const brand = getBrand(event.user);
 		const format = FORMATS[route.format] ? route.format : "general";
 
+		// País: el que diga el mensaje ("para Chile") o el de la pestaña Home.
+		const country = COUNTRIES?.[route.country] ? route.country : getCountry(event.user);
 		switch (route.action) {
 			case "crear":
 			case "reescribir":
 			case "ortografia": {
 				const text = (route.text || message).trim();
-				return processCopyRequest({ userId: event.user, channel, thread_ts, action: route.action, text, brand, format });
+				return processCopyRequest({ userId: event.user, channel, thread_ts, action: route.action, text, brand, format, country });
+			}
+			case "tropicalizar": {
+				const text = (route.text || message).trim();
+				const countries = COUNTRIES?.[route.country] && route.country !== "mx" ? [route.country] : ["co", "cl"];
+				return processTropicalRequest({ userId: event.user, channel, thread_ts, text, brand, countries });
 			}
 			case "lote":
-				return processLote({ userId: event.user, channel, thread_ts, items: route.items || [], brand, format });
+				return processLote({ userId: event.user, channel, thread_ts, items: route.items || [], brand, format, country });
 			case "reporte_uso": {
 				if (ADMIN_IDS.length && !ADMIN_IDS.includes(event.user)) {
 					return slack("chat.postMessage", { channel, thread_ts, text: "🔒 El reporte de uso solo está disponible para admins de Topito." });
@@ -1022,10 +1116,17 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			hint: "Ej. 4 headlines para la colección de lentes de sol, tono divertido, mencionar 2x1",
 		},
 		ortografia: { title: "Revisar ortografía", submit: "Revisar", label: "Texto a revisar", hint: null },
+		tropicalizar: {
+			title: "Tropicalizar copy",
+			submit: "Tropicalizar",
+			label: "Copy de México",
+			hint: "Pega el copy mexicano; te devuelvo la versión para Colombia y Chile",
+		},
 	};
 
-	function reescribirModal({ text, brand, meta, action = "reescribir" }) {
+	function reescribirModal({ text, brand, meta, action = "reescribir", country = "mx" }) {
 		const option = (value, label) => ({ text: { type: "plain_text", text: label }, value });
+		const countryOptions = Object.entries(COUNTRIES || {}).map(([k, v]) => option(k, `${v.flag} ${v.label}`));
 		const brandOptions = Object.entries(BRANDS).map(([k, v]) => option(k, v.label));
 		const formatOptions = Object.entries(FORMATS).map(([k, v]) => option(k, v.label));
 		const copy = MODAL_COPY[action] || MODAL_COPY.reescribir;
@@ -1048,7 +1149,22 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 						initial_option: brandOptions.find((o) => o.value === brand),
 					},
 				},
-				...(action === "ortografia"
+				...(["crear", "reescribir"].includes(action) && countryOptions.length
+					? [
+							{
+								type: "input",
+								block_id: "country",
+								label: { type: "plain_text", text: "País" },
+								element: {
+									type: "static_select",
+									action_id: "v",
+									options: countryOptions,
+									initial_option: countryOptions.find((o) => o.value === country) || countryOptions[0],
+								},
+							},
+						]
+					: []),
+				...(action === "ortografia" || action === "tropicalizar"
 					? []
 					: [
 							{
@@ -1150,6 +1266,20 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 						initial_option: brandOptions.find((o) => o.value === brand),
 					},
 				},
+				...(Object.keys(COUNTRIES || {}).length
+					? [
+							{
+								type: "section",
+								text: { type: "mrkdwn", text: "*País por defecto*\nPara Colombia o Chile escribo con su español y las reglas de la pestaña *Tropicalización*." },
+								accessory: {
+									type: "static_select",
+									action_id: "home_country",
+									options: Object.entries(COUNTRIES).map(([k, v]) => option(k, `${v.flag} ${v.label}`)),
+									initial_option: option(getCountry(userId), `${COUNTRIES[getCountry(userId)].flag} ${COUNTRIES[getCountry(userId)].label}`),
+								},
+							},
+						]
+					: []),
 				{
 					type: "actions",
 					block_id: "home_actions",
@@ -1157,6 +1287,7 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 						{ type: "button", action_id: "home_open_crear", style: "primary", text: { type: "plain_text", text: "✍️ Crear copy", emoji: true } },
 						{ type: "button", action_id: "home_open_reescribir", text: { type: "plain_text", text: "🔁 Reescribir", emoji: true } },
 						{ type: "button", action_id: "home_open_ortografia", text: { type: "plain_text", text: "🔤 Ortografía", emoji: true } },
+						{ type: "button", action_id: "home_open_tropicalizar", text: { type: "plain_text", text: "🌎 Tropicalizar", emoji: true } },
 					],
 				},
 				{ type: "context", elements: [{ type: "mrkdwn", text: "Los resultados te llegan por DM, con botones para calificar, pedir otra tanda o mandar a Figma." }] },
@@ -1231,7 +1362,7 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			if (payload.callback_id === "topito_reescribir") {
 				return slack("views.open", {
 					trigger_id: payload.trigger_id,
-					view: reescribirModal({ text, brand: getBrand(userId), meta: { response_url: payload.response_url } }),
+					view: reescribirModal({ text, brand: getBrand(userId), country: getCountry(userId), meta: { response_url: payload.response_url } }),
 				});
 			}
 			if (payload.callback_id === "topito_ortografia") {
@@ -1247,13 +1378,14 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			const v = payload.view.state.values;
 			const brand = v.brand.v.selected_option?.value || getBrand(userId);
 			const format = v.format.v.selected_option?.value || "general";
+			const country = v.country?.v.selected_option?.value || getCountry(userId);
 			const text = v.text.v.value || "";
 			const meta = JSON.parse(payload.view.private_metadata || "{}");
 			setBrand(userId, brand);
 			if (meta.response_url) {
 				postToResponseUrl(meta.response_url, { response_type: "ephemeral", text: "🔁 Reescribiendo… te mando las opciones por DM." }).catch(() => {});
 			}
-			return processCopyRequest({ userId, channel: userId, action: "reescribir", text, brand, format });
+			return processCopyRequest({ userId, channel: userId, action: "reescribir", text, brand, format, country });
 		}
 
 		if (payload.type === "view_submission" && payload.view?.callback_id === "topito_feedback_detail") {
@@ -1272,14 +1404,19 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			}).catch((err) => console.error("[slack] motivo de feedback:", err.message));
 		}
 
-		if (payload.type === "view_submission" && ["topito_crear_submit", "topito_ortografia_submit"].includes(payload.view?.callback_id)) {
+		if (
+			payload.type === "view_submission" &&
+			["topito_crear_submit", "topito_ortografia_submit", "topito_tropicalizar_submit"].includes(payload.view?.callback_id)
+		) {
 			const v = payload.view.state.values;
-			const action = payload.view.callback_id === "topito_crear_submit" ? "crear" : "ortografia";
+			const action = payload.view.callback_id.replace(/^topito_|_submit$/g, "");
 			const brand = v.brand.v.selected_option?.value || getBrand(userId);
 			const format = v.format?.v.selected_option?.value || "general";
+			const country = v.country?.v.selected_option?.value || getCountry(userId);
 			const text = v.text.v.value || "";
 			setBrand(userId, brand);
-			return processCopyRequest({ userId, channel: userId, action, text, brand, format });
+			if (action === "tropicalizar") return processTropicalRequest({ userId, channel: userId, text, brand });
+			return processCopyRequest({ userId, channel: userId, action, text, brand, format, country });
 		}
 
 		// --- Botones ---
@@ -1296,12 +1433,16 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 				setBrand(userId, act.selected_option?.value);
 				return publishHome(userId);
 			}
+			if (act.action_id === "home_country") {
+				setCountry(userId, act.selected_option?.value);
+				return publishHome(userId);
+			}
 			if (act.action_id === "home_glossary_link") return; // es un link, Slack solo avisa
-			const homeOpen = act.action_id.match(/^home_open_(crear|reescribir|ortografia)$/);
+			const homeOpen = act.action_id.match(/^home_open_(crear|reescribir|ortografia|tropicalizar)$/);
 			if (homeOpen) {
 				return slack("views.open", {
 					trigger_id: payload.trigger_id,
-					view: reescribirModal({ text: "", brand: getBrand(userId), meta: {}, action: homeOpen[1] }),
+					view: reescribirModal({ text: "", brand: getBrand(userId), country: getCountry(userId), meta: {}, action: homeOpen[1] }),
 				});
 			}
 
@@ -1326,8 +1467,14 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 				return;
 			}
 
+			if (/^tropical_\d+$/.test(act.action_id)) {
+				const { b, t } = JSON.parse(act.value);
+				const thread_ts = message?.thread_ts || message?.ts;
+				return processTropicalRequest({ userId, channel: channel || userId, thread_ts, text: t, brand: BRANDS[b] ? b : getBrand(userId) });
+			}
+
 			if (/^(like|neutral|dislike)_\w+$/.test(act.action_id)) {
-				const { r, b, s: rawSource, t } = JSON.parse(act.value);
+				const { r, b, c, s: rawSource, t } = JSON.parse(act.value);
 				const idx = act.action_id.split("_")[1];
 				// 👎 explícito: se marca para distinguirlo del "bad" automático (ver storage.loadDislikes).
 				const s = r === "bad" ? `${rawSource}-explicito` : rawSource;
@@ -1339,7 +1486,7 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 						view: feedbackDetailModal({ clientKey, rating: r, brand: BRANDS[b] ? b : DEFAULT_BRAND, text: t }),
 					}).catch((err) => console.error("[slack] modal de feedback:", err.details ?? err));
 				}
-				saveFeedback({ clientKey, text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
+				saveFeedback({ clientKey, country: c || null, text: t, rating: r, source: s, brand: BRANDS[b] ? b : DEFAULT_BRAND, original: null, author: getUserEmail(userId), channel: "slack" });
 				if (message?.blocks && payload.response_url) {
 					// Reemplazamos los botones de esa opción por la calificación.
 					const label = `${r === "like" ? "👍 Me encanta" : r === "bad" ? "👎 No va (Topito evitará algo así)" : "⚪ Sirve con ajustes"} — <@${userId}>`;
@@ -1359,7 +1506,7 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 			}
 
 			if (act.action_id === "retry" || act.action_id === "retry_brand") {
-				const { a, b, f, p } = JSON.parse(act.value);
+				const { a, b, f, p, c } = JSON.parse(act.value);
 				const brand = BRANDS[b] ? b : getBrand(userId);
 				// Igual que en el plugin: pedir otra tanda sin calificar = esas opciones "no sirvieron".
 				if (message?.blocks && act.action_id === "retry") {
@@ -1381,7 +1528,7 @@ Califica las opciones con 👍 / ⚪ / 👎 — así aprendo el tono del equipo.
 				}
 				if (act.action_id === "retry_brand") setBrand(userId, brand);
 				const thread_ts = message?.thread_ts || message?.ts;
-				return processCopyRequest({ userId, channel: channel || userId, thread_ts, action: a, text: p, brand, format: f });
+				return processCopyRequest({ userId, channel: channel || userId, thread_ts, action: a, text: p, brand, format: f, country: c });
 			}
 		}
 	}

@@ -354,6 +354,34 @@ const BRANDS = {
 };
 const DEFAULT_BRAND = "benandfrank";
 
+// --- Países (tropicalización) ---
+// México es la base (ejemplos de tono, glosario). Para Colombia y Chile se agregan
+// una guía de español local y las reglas de la pestaña "Tropicalización" del Sheet.
+const COUNTRIES = {
+	mx: { label: "México", flag: "🇲🇽", guide: "" },
+	co: {
+		label: "Colombia",
+		flag: "🇨🇴",
+		guide:
+			"español de Colombia: natural y cercano, sin modismos mexicanos (nada de 'chido', 'padre', 'güey', 'órale', 'pásele', 'ándale'). Precios o monedas solo si vienen en la petición.",
+	},
+	cl: {
+		label: "Chile",
+		flag: "🇨🇱",
+		guide:
+			"español de Chile: tuteo, natural y cercano, sin modismos mexicanos (nada de 'chido', 'padre', 'güey', 'órale', 'pásele', 'ándale'); giros chilenos solo si suenan naturales, sin caricaturizar. Precios o monedas solo si vienen en la petición.",
+	},
+};
+const DEFAULT_COUNTRY = "mx";
+const resolveCountry = (c) => (COUNTRIES[String(c || "").toLowerCase()] ? String(c).toLowerCase() : DEFAULT_COUNTRY);
+
+// Bloque del prompt para escribir directo para CO/CL.
+function countryPrompt(brand, country) {
+	if (country === "mx") return "";
+	const c = COUNTRIES[country];
+	return `\nPAÍS DE DESTINO: ${c.label}. Los ejemplos de estilo son de México: conserva el tono y la personalidad de la marca, pero escribe en ${c.guide}${storage.tropicalPrompt(brand, country)}`;
+}
+
 // --- Formatos/canales soportados en /reescribir y /generate ---
 // El plugin manda `format` en el body para que el copy salga ya ajustado al canal
 // donde se va a usar, en vez de un texto genérico que hay que recortar después.
@@ -999,7 +1027,8 @@ app.post("/ortografia", async (req, res) => {
 //   raw        -> lista "* opción" (compatibilidad con el plugin actual)
 //   options    -> [{ text, angle, angleLabel, fields:[{label,value,length,max,ok}], ok }]
 //   references -> { method, count, top } para mostrar "inspirado en…"
-async function runCopy({ mode, prompt, brand, format }) {
+async function runCopy({ mode, prompt, brand, format, country = DEFAULT_COUNTRY }) {
+	country = resolveCountry(country);
 	const endpoint = mode === "reescribir" ? "/reescribir" : "/generate";
 	const model = mode === "reescribir" ? CLAUDE_MODEL_REESCRIBIR : CLAUDE_MODEL_GENERATE;
 	const formatDef = FORMATS[format];
@@ -1017,7 +1046,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema a ${mode === "reescribir" ? "el texto que me pediste reescribir" : "lo que me pediste"}:
 
 ${reference.text}
-${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${lessonsPrompt(brand)}${dislikesPrompt(brand)}
+${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${countryPrompt(brand, country)}${lessonsPrompt(brand)}${dislikesPrompt(brand)}
 ${task}
 ${outputInstructions({ formatDef, angles })}
 `;
@@ -1049,14 +1078,20 @@ ${outputInstructions({ formatDef, angles })}
 		}
 	}
 
-	const final = options.map((o) => ({
-		text: optionText(o, formatDef),
-		angle: o.angle,
-		angleLabel: o.angle ? ANGLES[o.angle] : null,
-		fields: o.fields,
-		ok: o.ok,
-	}));
+	const final = options.map((o) => {
+		const text = optionText(o, formatDef);
+		return {
+			text,
+			angle: o.angle,
+			angleLabel: o.angle ? ANGLES[o.angle] : null,
+			fields: o.fields,
+			ok: o.ok,
+			// Términos mexicanos que se colaron en un copy para CO/CL.
+			tropical: storage.tropicalViolations(brand, country, text),
+		};
+	});
 	return {
+		country,
 		raw: toLegacyList(final),
 		options: final,
 		references: {
@@ -1068,7 +1103,49 @@ ${outputInstructions({ formatDef, angles })}
 	};
 }
 
-const reescribirCore = ({ prompt, brand, format }) => runCopy({ mode: "reescribir", prompt, brand, format });
+const reescribirCore = ({ prompt, brand, format, country }) => runCopy({ mode: "reescribir", prompt, brand, format, country });
+
+// --- Tropicalizar: un copy (de México) → versiones para Colombia y/o Chile ---
+async function tropicalizeCore({ text, brand, countries = ["co", "cl"] }) {
+	const targets = [...new Set(countries.map((c) => resolveCountry(c)).filter((c) => c !== "mx"))];
+	if (!targets.length) throw new Error("Indica al menos un país: co o cl");
+	const blocks = targets
+		.map((c) => `- ${c} (${COUNTRIES[c].label}): escribe en ${COUNTRIES[c].guide}${storage.tropicalPrompt(brand, c).replace(/\n/g, " ")}`)
+		.join("\n");
+	const fullPrompt = `Eres el copywriter de ${BRANDS[brand].label} para Latinoamérica. Adapta ("tropicaliza") este copy escrito para México a cada país indicado.
+Conserva la idea, la estructura, la longitud aproximada, los emojis y el tono de la marca; cambia solo lo necesario para que suene local.
+${storage.glossaryPrompt(brand)}
+Países:
+${blocks}
+
+Copy original (México):
+${text}
+
+Responde ÚNICAMENTE con un JSON válido, sin markdown: {${targets.map((c) => `"${c}":"..."`).join(",")}}`;
+	const { text: raw, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_REESCRIBIR, { maxTokens: 1500 });
+	logUsage({ endpoint: "/tropicalizar", provider: "claude", model: CLAUDE_MODEL_REESCRIBIR, ...usage });
+	let data = {};
+	try {
+		const clean = raw.replace(/```(?:json)?/gi, "");
+		data = JSON.parse(clean.slice(clean.indexOf("{"), clean.lastIndexOf("}") + 1));
+	} catch {
+		throw new Error("No pude leer la respuesta de tropicalización");
+	}
+	return {
+		original: text,
+		versions: targets.map((c) => {
+			const t = String(data[c] || "").trim();
+			return {
+				country: c,
+				label: COUNTRIES[c].label,
+				flag: COUNTRIES[c].flag,
+				text: t,
+				tropical: storage.tropicalViolations(brand, c, t),
+				glossary: storage.glossaryViolations(brand, t),
+			};
+		}),
+	};
+}
 
 // --- Copy desde imagen (Slack) ---
 // 1) Claude con visión lee la imagen: ¿es una pieza de la marca casi final o una
@@ -1076,7 +1153,7 @@ const reescribirCore = ({ prompt, brand, format }) => runCopy({ mode: "reescribi
 // 2) Con esa lectura se arma una petición normal de "crear" (runCopy), así hereda
 //    referencias ★, glosario, 👎, límites por formato y botones.
 const IMAGE_MEDIA_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-async function imageCopyCore({ image, note = "", brand, format }) {
+async function imageCopyCore({ image, note = "", brand, format, country }) {
 	if (!IMAGE_MEDIA_TYPES.includes(image.mediaType)) throw new Error("Formato de imagen no soportado");
 	const brandName = BRANDS[brand].label;
 	const visionPrompt = `Eres el revisor de copy de ${brandName} (ópticas, México).
@@ -1116,7 +1193,7 @@ ${note ? `Petición: ${note}` : ""}`
 Qué se ve: ${info.descripcion}
 ${textos.length ? `Textos en la imagen: ${textos.map((t) => `"${t}"`).join(" / ")}` : ""}
 ${note ? `Petición: ${note}` : ""}`;
-	const result = await runCopy({ mode: "crear", prompt: prompt.trim(), brand, format });
+	const result = await runCopy({ mode: "crear", prompt: prompt.trim(), brand, format, country });
 	return {
 		...result,
 		prompt: prompt.trim(), // para "Otra tanda" sin volver a mandar la imagen
@@ -1128,7 +1205,7 @@ ${note ? `Petición: ${note}` : ""}`;
 		},
 	};
 }
-const generateCore = ({ prompt, brand, format }) => runCopy({ mode: "crear", prompt, brand, format });
+const generateCore = ({ prompt, brand, format, country }) => runCopy({ mode: "crear", prompt, brand, format, country });
 
 
 app.post("/reescribir", async (req, res) => {
@@ -1138,9 +1215,10 @@ app.post("/reescribir", async (req, res) => {
 	const brand = resolveBrand(req, res);
 	if (brand === null) return;
 	const format = resolveFormat(req.body?.format);
+	const country = resolveCountry(req.body?.country);
 
 	try {
-		const result = await reescribirCore({ prompt, brand, format });
+		const result = await reescribirCore({ prompt, brand, format, country });
 		res.json({ correctedText: result.raw, options: result.options, references: result.references });
 	} catch (err) {
 		respondWithError(res, err, "/reescribir");
@@ -1154,13 +1232,32 @@ app.post("/generate", async (req, res) => {
 	const brand = resolveBrand(req, res);
 	if (brand === null) return;
 	const format = resolveFormat(req.body?.format);
+	const country = resolveCountry(req.body?.country);
 
 	try {
-		const result = await generateCore({ prompt, brand, format });
-		res.json({ text: result.raw, options: result.options, references: result.references });
+		const result = await generateCore({ prompt, brand, format, country });
+		res.json({ text: result.raw, options: result.options, references: result.references, country });
 	} catch (err) {
 		respondWithError(res, err, "/generate");
 	}
+});
+
+// Tropicalizar un copy mexicano: { text, brand?, countries?: ["co","cl"] } -> { versions: [...] }
+app.post("/tropicalizar", async (req, res) => {
+	if (requireAuth(req, res) === null) return;
+	const text = String(req.body?.text || "").trim();
+	if (!text) return res.status(400).json({ error: "Falta 'text'." });
+	const brand = BRANDS[req.body?.brand] ? req.body.brand : DEFAULT_BRAND;
+	try {
+		res.json(await tropicalizeCore({ text: text.slice(0, 3000), brand, countries: req.body?.countries || ["co", "cl"] }));
+	} catch (err) {
+		respondWithError(res, err, "/tropicalizar");
+	}
+});
+
+// Países disponibles (para selectores del plugin / Docs / Sheets).
+app.get("/countries", (req, res) => {
+	res.json(Object.entries(COUNTRIES).map(([key, c]) => ({ key, label: c.label, flag: c.flag })));
 });
 
 // El plugin manda esto cuando el usuario califica una opción generada por IA
@@ -1451,14 +1548,19 @@ app.post("/sheets/copy", async (req, res) => {
 	if (typeof text !== "string" || !text.trim()) return res.status(400).json({ error: "Falta 'text'." });
 	const brand = BRANDS[rawBrand] ? rawBrand : DEFAULT_BRAND;
 	const format = resolveFormat(rawFormat);
+	const country = resolveCountry(req.body?.country);
 	try {
+		if (action === "tropicalizar") {
+			const out = await tropicalizeCore({ text, brand, countries: country === "mx" ? ["co", "cl"] : [country] });
+			return res.json({ options: out.versions.map((v) => ({ text: v.text, angleLabel: `${v.flag} ${v.label}`, ok: !v.tropical.length, fields: [] })) });
+		}
 		if (action === "ortografia") {
 			const corrected = await ortografiaCore({ prompt: text, brand });
 			return res.json({ options: [{ text: corrected, ok: true, fields: [] }] });
 		}
 		const result = action === "reescribir"
-			? await reescribirCore({ prompt: text, brand, format })
-			: await generateCore({ prompt: text, brand, format });
+			? await reescribirCore({ prompt: text, brand, format, country })
+			: await generateCore({ prompt: text, brand, format, country });
 		res.json({ options: result.options, references: result.references });
 	} catch (err) {
 		respondWithError(res, err, "/sheets/copy");
@@ -1481,6 +1583,8 @@ registerSlackRoutes(app, {
 	reescribirCore,
 	generateCore,
 	imageCopyCore,
+	tropicalizeCore,
+	COUNTRIES,
 	saveFeedback,
 	saveFeedbackDetail,
 	FEEDBACK_REASONS,

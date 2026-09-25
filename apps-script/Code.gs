@@ -26,6 +26,13 @@
  *     editora o lectora. Así Topito no puede usarse para leer lo que no te
  *     compartieron, aunque el script corra con la cuenta de Zul.
  *
+ * Fase 5 (tropicalización):
+ *   • "Tropicalización": Content define cómo cambia cada término por país.
+ *     Columnas: México (base) | Colombia | Chile | Marca | Nota
+ *     Vacío en Colombia/Chile = se queda igual que en México.
+ *     Ej.: #cuatroojos | (vacío) | #piti  ·  lentes | gafas | (vacío)
+ *   • "Lote" tiene columna País (mx / co / cl) al final.
+ *
  * Seguridad: "Cualquier persona" solo significa que la URL no pide login de
  * Google; sin el secreto correcto toda petición se rechaza. Permisos mínimos en
  * appsscript.json (lectura de Drive/Docs/Sheets, escritura solo en ESTE Sheet).
@@ -39,6 +46,9 @@ var LOTE_TAB = 'Lote';
 var LOTE_HEADERS = ['Acción', 'Marca', 'Formato', 'Texto o brief', 'Opción 1', 'Opción 2', 'Opción 3', 'Opción 4', 'Estado'];
 var FORMATOS = ['general', 'headline', 'primario', 'caption', 'web', 'email', 'google_ads', 'hook', 'cta'];
 var DEFAULT_SERVER_URL = 'https://topito-server.onrender.com';
+var TROPICAL_TAB = 'Tropicalización';
+var TROPICAL_HEADERS = ['México (base)', 'Colombia', 'Chile', 'Marca', 'Nota'];
+var PAIS_COL = 10; // columna J de "Lote"
 
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -77,7 +87,24 @@ function configurarTopito() {
   lote.getRange('D:H').setWrap(true);
   if (lote.getLastRow() < 2) {
     lote.getRange(2, 1, 1, 4).setValues([['crear', 'benandfrank', 'caption', 'Lanzamiento de la colección de lentes de sol de verano']]);
+    lote.getRange(2, PAIS_COL).setValue('mx');
   }
+
+  lote.getRange(1, PAIS_COL).setValue('País').setFontWeight('bold');
+  lote.getRange(2, PAIS_COL, Math.max(lote.getMaxRows() - 1, 1), 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(['mx', 'co', 'cl'], true).build());
+
+  var tropical = ensureTab_(ss, TROPICAL_TAB, TROPICAL_HEADERS);
+  if (tropical.getLastRow() < 2) {
+    tropical.getRange(2, 1, 2, 5).setValues([
+      ['#cuatroojos', '', '#piti', 'benandfrank', 'Hashtag de comunidad'],
+      ['lentes', 'gafas', '', 'todas', 'En Colombia se dice gafas'],
+    ]);
+  }
+  tropical.getRange('D2:D').setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(['todas', 'benandfrank', 'bombavista'], true).build());
+  tropical.setColumnWidths(1, 3, 180);
+  tropical.setColumnWidth(5, 260);
 
   var props = PropertiesService.getScriptProperties();
   var secret = props.getProperty('TOPITO_SECRET');
@@ -125,6 +152,12 @@ function doPost(e) {
       var last = sh.getLastRow();
       var rows = last < 2 ? [] : sh.getRange(2, 1, last - 1, 4).getDisplayValues();
       return json_({ ok: true, rows: rows });
+    }
+    if (body.action === 'tropical') {
+      var tsh = ss.getSheetByName(TROPICAL_TAB);
+      var tlast = tsh ? tsh.getLastRow() : 0;
+      var trows = tlast < 2 ? [] : tsh.getRange(2, 1, tlast - 1, 5).getDisplayValues();
+      return json_({ ok: true, rows: trows });
     }
     if (body.action === 'readDoc') return json_(readDoc_(body.url, body.requester));
     if (body.action === 'ping') return json_({ ok: true });
@@ -216,6 +249,7 @@ function generarCopySeleccion() {
     var marca = String(v[1] || 'benandfrank').trim();
     var formato = String(v[2] || 'general').trim();
     var texto = String(v[3] || '').trim();
+    var pais = String(sheet.getRange(row, PAIS_COL).getValue() || 'mx').trim().toLowerCase();
     if (!texto) continue;
     sheet.getRange(row, 9).setValue('⏳ escribiendo…');
     SpreadsheetApp.flush();
@@ -224,7 +258,7 @@ function generarCopySeleccion() {
         method: 'post',
         contentType: 'application/json',
         headers: { 'X-Topito-Secret': secret },
-        payload: JSON.stringify({ action: accion, brand: marca, format: formato, text: texto }),
+        payload: JSON.stringify({ action: accion, brand: marca, format: formato, text: texto, country: pais }),
         muteHttpExceptions: true,
       });
       var data = JSON.parse(res.getContentText() || '{}');

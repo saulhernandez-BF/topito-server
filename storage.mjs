@@ -130,9 +130,57 @@ export function createStorage({ fetchWithTimeout }) {
 			console.error("[storage] No se pudo leer el glosario:", err.message);
 		}
 	}
+	// Tropicalización (pestaña "Tropicalización"): México (base) | Colombia | Chile | Marca | Nota.
+	// Vacío = igual que México.
+	let tropical = [];
+	let tropicalLoadedAt = 0;
+	async function refreshTropical() {
+		if (!sheetsEnabled) return;
+		try {
+			const data = await sheetCall("tropical");
+			tropical = (data.rows || [])
+				.map(([mx = "", co = "", cl = "", brand = "", note = ""]) => ({
+					mx: mx.trim(),
+					co: co.trim(),
+					cl: cl.trim(),
+					brand: brand.trim().toLowerCase().replace(/[\s&]/g, ""),
+					note: note.trim(),
+				}))
+				.filter((r) => r.mx && (r.co || r.cl));
+			tropicalLoadedAt = Date.now();
+		} catch (err) {
+			console.error("[storage] No se pudo leer la tropicalización:", err.message);
+		}
+	}
 	if (sheetsEnabled) {
 		refreshGlossary();
-		setInterval(refreshGlossary, GLOSSARY_REFRESH_MS).unref();
+		refreshTropical();
+		setInterval(() => {
+			refreshGlossary();
+			refreshTropical();
+		}, GLOSSARY_REFRESH_MS).unref();
+	}
+
+	const tropicalFor = (brand, country) =>
+		country && country !== "mx"
+			? tropical.filter((r) => r[country] && r[country] !== r.mx && (!r.brand || r.brand === "todas" || r.brand === brand))
+			: [];
+
+	// Reglas para el prompt cuando se escribe para Colombia/Chile.
+	function tropicalPrompt(brand, country) {
+		const rules = tropicalFor(brand, country);
+		if (!rules.length) return "";
+		return `\nReemplazos OBLIGATORIOS para este país (del equipo): ${rules
+			.map((r) => `"${r.mx}" → "${r[country]}"${r.note ? ` (${r.note})` : ""}`)
+			.join("; ")}. Nunca uses la versión mexicana de estos términos.\n`;
+	}
+
+	// Términos mexicanos que se colaron en un copy para CO/CL.
+	function tropicalViolations(brand, country, text) {
+		const t = String(text || "");
+		return tropicalFor(brand, country)
+			.filter((r) => wordRe(r.mx).test(t))
+			.map((r) => ({ term: r.mx, replacement: r[country] }));
 	}
 
 	function glossaryFor(brand) {
@@ -162,10 +210,11 @@ export function createStorage({ fetchWithTimeout }) {
 	// Revisa un texto ya generado y regresa las palabras prohibidas que contiene.
 	// Palabra/frase completa (no subcadena): "vos" no debe marcar "nuevos".
 	const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const wordRe = (term) => new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(term)}($|[^\\p{L}\\p{N}])`, "iu");
 	function glossaryViolations(brand, text) {
 		const t = String(text || "");
 		return glossaryFor(brand)
-			.filter((g) => g.type === "prohibida" && new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(g.term)}($|[^\\p{L}\\p{N}])`, "iu").test(t))
+			.filter((g) => g.type === "prohibida" && wordRe(g.term).test(t))
 			.map((g) => g.term);
 	}
 
@@ -258,16 +307,25 @@ export function createStorage({ fetchWithTimeout }) {
 		async loadSlackPrefs() {
 			if (!dbEnabled) return null;
 			try {
-				const rows = await selectAll("slack_prefs", "select=user_id,brand");
-				return Object.fromEntries(rows.map((r) => [r.user_id, { brand: r.brand }]));
+				let rows;
+				try {
+					rows = await selectAll("slack_prefs", "select=user_id,brand,country");
+				} catch {
+					rows = await selectAll("slack_prefs", "select=user_id,brand"); // antes de la migración de país
+				}
+				return Object.fromEntries(rows.map((r) => [r.user_id, { brand: r.brand, country: r.country || null }]));
 			} catch (err) {
 				console.error("[storage] No se pudo leer slack_prefs:", err.message);
 				return null;
 			}
 		},
 
-		saveSlackPref(userId, brand) {
-			insert("slack_prefs", [{ user_id: userId, brand, updated_at: new Date().toISOString() }], { onConflict: "user_id" });
+		saveSlackPref(userId, brand, country) {
+			insert(
+				"slack_prefs",
+				[{ user_id: userId, brand, ...(country ? { country } : {}), updated_at: new Date().toISOString() }],
+				{ onConflict: "user_id" },
+			);
 		},
 
 		// --- Fase 3: bandeja "Mandar a Figma" ---
@@ -362,6 +420,11 @@ export function createStorage({ fetchWithTimeout }) {
 		glossaryPrompt,
 		glossaryViolations,
 		glossaryFor,
+		tropicalFor,
+		tropicalPrompt,
+		tropicalViolations,
+		refreshTropical,
+		tropicalInfo: () => ({ rules: tropical.length, loadedAt: tropicalLoadedAt || null }),
 		refreshGlossary,
 		glossaryInfo: () => ({ terms: glossary.length, loadedAt: glossaryLoadedAt || null }),
 	};
