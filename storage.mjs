@@ -160,10 +160,12 @@ export function createStorage({ fetchWithTimeout }) {
 	}
 
 	// Revisa un texto ya generado y regresa las palabras prohibidas que contiene.
+	// Palabra/frase completa (no subcadena): "vos" no debe marcar "nuevos".
+	const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	function glossaryViolations(brand, text) {
-		const lower = String(text || "").toLowerCase();
+		const t = String(text || "");
 		return glossaryFor(brand)
-			.filter((g) => g.type === "prohibida" && lower.includes(g.term.toLowerCase()))
+			.filter((g) => g.type === "prohibida" && new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRe(g.term)}($|[^\\p{L}\\p{N}])`, "iu").test(t))
 			.map((g) => g.term);
 	}
 
