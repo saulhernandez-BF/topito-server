@@ -48,6 +48,7 @@ const ANTHROPIC_API_URL = (process.env.ANTHROPIC_API_URL || "https://api.anthrop
 const GEMINI_MODEL_FAST = process.env.GEMINI_MODEL_FAST || "gemini-2.5-flash";
 // Ortografía: tarea mecánica y de alto volumen -> Haiku (barato). Reescribir y Crear: copy de marca -> Sonnet, que respeta mejor el tono.
 const CLAUDE_MODEL_ORTOGRAFIA = process.env.CLAUDE_MODEL_ORTOGRAFIA || "claude-haiku-4-5-20251001";
+const CLAUDE_MODEL_ORTOGRAFIA_FALLBACK = process.env.CLAUDE_MODEL_ORTOGRAFIA_FALLBACK || "claude-sonnet-5";
 const CLAUDE_MODEL_REESCRIBIR = process.env.CLAUDE_MODEL_REESCRIBIR || "claude-sonnet-5";
 const CLAUDE_MODEL_GENERATE = process.env.CLAUDE_MODEL_GENERATE || "claude-sonnet-5";
 const EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
@@ -993,16 +994,24 @@ Responde ÚNICAMENTE con el texto corregido, sin comillas ni explicación.
 
 Texto:
 ${prompt}`;
-	const { text: correctedText, usage } = await callClaude(fullPrompt, CLAUDE_MODEL_ORTOGRAFIA, {
-		temperature: 0,
-	});
-	logUsage({
-		endpoint: "/ortografia",
-		provider: "claude",
-		model: CLAUDE_MODEL_ORTOGRAFIA,
-		...usage,
-	});
-	return correctedText;
+	// Haiku primero; si falla (saturación, timeout, error de la API) se reintenta
+	// una vez con el modelo de respaldo para que la corrección no se quede sin hacer.
+	let model = CLAUDE_MODEL_ORTOGRAFIA;
+	let result;
+	try {
+		result = await callClaude(fullPrompt, model, { temperature: 0 });
+		if (!result.text.trim()) throw new Error("Respuesta vacía de Claude");
+	} catch (err) {
+		console.warn(`/ortografia: falló ${model} (${err.message}); reintento con ${CLAUDE_MODEL_ORTOGRAFIA_FALLBACK}`);
+		model = CLAUDE_MODEL_ORTOGRAFIA_FALLBACK;
+		result = await callClaude(fullPrompt, model, { temperature: 0 });
+	}
+	logUsage({ endpoint: "/ortografia", provider: "claude", model, ...result.usage });
+	// Si el texto ya estaba bien y solo cambió la forma Unicode de las tildes
+	// (ej. "a" + acento combinado -> "á", común al copiar desde Mac/PDF), se
+	// devuelve el original para que los clientes no muestren un "cambio" idéntico.
+	const corrected = result.text.trim().normalize("NFC");
+	return corrected === prompt.trim().normalize("NFC") ? prompt : corrected;
 }
 
 app.post("/ortografia", async (req, res) => {
