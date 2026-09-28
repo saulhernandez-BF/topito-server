@@ -1010,8 +1010,9 @@ ${prompt}`;
 	// Si el texto ya estaba bien y solo cambió la forma Unicode de las tildes
 	// (ej. "a" + acento combinado -> "á", común al copiar desde Mac/PDF), se
 	// devuelve el original para que los clientes no muestren un "cambio" idéntico.
+	const norm = (t) => t.normalize("NFC").replace(/[\s\u00a0\u200b]+/g, " ").trim();
 	const corrected = result.text.trim().normalize("NFC");
-	return corrected === prompt.trim().normalize("NFC") ? prompt : corrected;
+	return norm(corrected) === norm(prompt) ? prompt : corrected;
 }
 
 app.post("/ortografia", async (req, res) => {
