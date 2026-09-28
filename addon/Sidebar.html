@@ -210,8 +210,13 @@
       $('useSel').onclick = useSelection;
       ['brand', 'country', 'format'].forEach(function (id) { $(id).onchange = savePrefs; });
 
+      // El server gratis de Render puede tardar ~30 s en despertar la primera vez.
+      msg('⏳ Conectando con Topito… (la primera vez del día puede tardar ~30 s)');
+      busy(true);
       google.script.run.withSuccessHandler(function (meta) {
         META = meta;
+        msg('');
+        busy(false);
         fill($('brand'), meta.brands, function (b) { return b.label; });
         fill($('country'), meta.countries, function (c) { return c.flag + ' ' + c.label; });
         fill($('format'), meta.formats, function (f) { return f.label; });
@@ -221,7 +226,7 @@
           if (p.format) $('format').value = p.format;
           setAction(state.action);
         }).leerPrefs();
-      }).withFailureHandler(function (e) { msg('😕 No pude conectar con Topito: ' + (e.message || e), true); setAction(state.action); }).metaTopito();
+      }).withFailureHandler(function (e) { busy(false); msg('😕 No pude conectar con Topito: ' + (e.message || e), true); setAction(state.action); }).metaTopito();
     </script>
   </body>
 </html>
