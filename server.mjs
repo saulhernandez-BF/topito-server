@@ -590,7 +590,12 @@ function loadBrandData(brandKey) {
 		/* todavía no hay performance.json: se rankea solo por parecido */
 	}
 
-	return { referenceData, referenceEmbeddings, performance };
+	// País de cada ejemplo (los de cuentas de Chile/Colombia traen country; el resto es MX).
+	const countryOfText = new Map();
+	for (const item of referenceData) if (item.country && item.country !== "mx") countryOfText.set(item.text, item.country);
+	if (countryOfText.size) console.log(`[${brandKey}] Ejemplos de otros países: ${countryOfText.size}.`);
+
+	return { referenceData, referenceEmbeddings, performance, countryOfText };
 }
 
 // Score de desempeño (0..1) de un texto, o null si no hay datos suficientes.
@@ -766,8 +771,14 @@ async function embedQueryRemote(text) {
 // Construye el bloque de ejemplos de tono para el prompt: los REFERENCE_TOP_K textos
 // más parecidos (por embeddings) al texto de la petición, dentro de la marca elegida.
 // Si esa marca no tiene embeddings o algo falla, cae de vuelta al muestreo al azar.
-async function buildRelevantReference(promptText, endpointForLog, brand) {
-	const { referenceEmbeddings } = brandData[brand];
+// Peso del país al elegir referencias: si piden copy para Chile, los anuncios reales
+// de Chile suben; si piden para México, los de otros países bajan (evita "piti" en MX).
+const COUNTRY_MATCH_BONUS = Number(process.env.COUNTRY_MATCH_BONUS ?? 0.05);
+const COUNTRY_MISMATCH_PENALTY = Number(process.env.COUNTRY_MISMATCH_PENALTY ?? 0.08);
+const COUNTRY_FLAGS = { cl: "🇨🇱", co: "🇨🇴" };
+
+async function buildRelevantReference(promptText, endpointForLog, brand, country = "mx") {
+	const { referenceEmbeddings, countryOfText } = brandData[brand];
 	if (!referenceEmbeddings || referenceEmbeddings.length === 0) {
 		return randomReference(brand);
 	}
@@ -786,9 +797,12 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 			.map((item) => {
 				const similarity = cosineSimilarity(queryVector, item.embedding);
 				const perf = performanceOf(brand, item.text);
+				const itemCountry = countryOfText?.get(item.text) || "mx";
+				const countryAdj =
+					itemCountry === country ? (country === "mx" ? 0 : COUNTRY_MATCH_BONUS) : itemCountry !== "mx" ? -COUNTRY_MISMATCH_PENALTY : 0;
 				// Sin datos de desempeño = neutral (0.5): ni premia ni castiga.
-				const score = similarity + PERFORMANCE_WEIGHT * ((perf ?? 0.5) - 0.5);
-				return { item, score, similarity, perf };
+				const score = similarity + PERFORMANCE_WEIGHT * ((perf ?? 0.5) - 0.5) + countryAdj;
+				return { item, score, similarity, perf, itemCountry };
 			})
 			.sort((a, b) => b.score - a.score);
 		// Variedad: si un candidato es casi idéntico (≥ REFERENCE_MAX_SIMILARITY) a uno ya
@@ -801,10 +815,17 @@ async function buildRelevantReference(promptText, endpointForLog, brand) {
 		}
 
 		return {
-			text: ranked.map((r) => (r.perf != null && r.perf >= TOP_PERFORMER_SCORE ? `★ ${r.item.text}` : r.item.text)).join("\n\n"),
+			text: ranked
+				.map((r) => {
+					const star = r.perf != null && r.perf >= TOP_PERFORMER_SCORE ? "★ " : "";
+					const flag = r.itemCountry !== "mx" ? `${COUNTRY_FLAGS[r.itemCountry] || r.itemCountry.toUpperCase()} ` : "";
+					return `${star}${flag}${r.item.text}`;
+				})
+				.join("\n\n"),
 			method: "embeddings",
-			items: ranked.map((r) => ({ text: r.item.text, score: r.similarity, perf: r.perf })),
+			items: ranked.map((r) => ({ text: r.item.text, score: r.similarity, perf: r.perf, country: r.itemCountry })),
 			topPerformers: ranked.filter((r) => r.perf != null && r.perf >= TOP_PERFORMER_SCORE).length,
+			localExamples: country !== "mx" ? ranked.filter((r) => r.itemCountry === country).length : 0,
 		};
 	} catch (err) {
 		if (!err.paused) console.error(`[${brand}] Fallback a muestreo al azar (falló la selección por relevancia):`, err.details ?? err);
@@ -1044,7 +1065,7 @@ async function runCopy({ mode, prompt, brand, format, country = DEFAULT_COUNTRY 
 	const formatDef = FORMATS[format];
 	const angles = mode === "crear"; // reescribir conserva el mensaje original; crear explora ángulos
 
-	const reference = await buildRelevantReference(prompt, endpoint, brand);
+	const reference = await buildRelevantReference(prompt, endpoint, brand, country);
 	const formatGuidance = formatDef.guidance ? `\nFormato de destino: ${formatDef.label}. ${formatDef.guidance}\n` : "";
 	const task =
 		mode === "reescribir"
@@ -1056,7 +1077,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema a ${mode === "reescribir" ? "el texto que me pediste reescribir" : "lo que me pediste"}:
 
 ${reference.text}
-${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${countryPrompt(brand, country)}${lessonsPrompt(brand)}${dislikesPrompt(brand)}
+${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${reference.localExamples ? `\nLos marcados con ${COUNTRY_FLAGS[country] || country.toUpperCase()} son anuncios reales de la marca en ${COUNTRIES[country]?.label || country}: úsalos como guía del vocabulario y modismos locales.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${countryPrompt(brand, country)}${lessonsPrompt(brand)}${dislikesPrompt(brand)}
 ${task}
 ${outputInstructions({ formatDef, angles })}
 `;

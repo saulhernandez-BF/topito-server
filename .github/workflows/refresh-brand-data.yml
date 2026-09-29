@@ -52,6 +52,7 @@ jobs:
         timeout-minutes: 80
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_ACCESS_TOKEN_CL: ${{ secrets.META_ACCESS_TOKEN_CL }}
           META_MAX_RUNTIME_MS: "600000" # 10 min por invocación; el loop repite hasta 70 min
         run: |
           DEADLINE=$(( $(date +%s) + 70*60 ))
@@ -94,6 +95,7 @@ jobs:
         timeout-minutes: 20
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_ACCESS_TOKEN_CL: ${{ secrets.META_ACCESS_TOKEN_CL }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           AD_PERF_MAX_RUNTIME_MS: "900000" # 15 min; si no alcanza, sigue mañana

@@ -1,5 +1,5 @@
 // Extrae los copys (título + texto principal) de los anuncios de Meta Ads para
-// Ben & Frank MX y Bombavista MX, y los agrega a data/<marca>/tuning.json (sin
+// Ben & Frank MX, Bombavista MX y Ben & Frank Chile, y los agrega a data/<marca>/tuning.json (sin
 // duplicar lo que ya había). Requiere META_ACCESS_TOKEN en .env (ver .env.example).
 //
 // Primera corrida (backfill completo): se puede correr varias veces seguidas --
@@ -27,7 +27,6 @@ import { fileURLToPath } from "url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
 
-const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const META_API_VERSION = process.env.META_API_VERSION || "v25.0";
 const BASE_URL = `https://graph.facebook.com/${META_API_VERSION}`;
 const MAX_REFERENCE_TEXT_LENGTH = 400;
@@ -38,13 +37,22 @@ const MIN_PAGE_LIMIT = 5; // si Meta sigue pidiendo "reduce the amount of data",
 // (el workflow pone META_MAX_RUNTIME_MS). Al llegar al tope guarda y sale limpio.
 const MAX_RUNTIME_MS = Number(process.env.META_MAX_RUNTIME_MS) || 95_000;
 
-// act_<id> por marca, según la documentación que compartió Sam (Marketing Digital).
-const ACCOUNTS = {
-	benandfrank: "act_10154078421154698",
-	bombavista: "act_1154268958403844",
-};
+// Cuentas de anuncios. "key" es la carpeta donde se guarda el progreso
+// (data/<key>/); los textos se agregan a data/<brand>/tuning.json. Las cuentas
+// de otros países (ej. Chile) marcan sus ejemplos con country para que el server
+// los prefiera cuando alguien pide copy para ese país.
+// Cada cuenta usa su propio token (solo lectura, ads_read); si falta, se omite.
+const ACCOUNTS = [
+	{ key: "benandfrank", brand: "benandfrank", country: "mx", account: "act_10154078421154698", tokenEnv: "META_ACCESS_TOKEN" },
+	{ key: "bombavista", brand: "bombavista", country: "mx", account: "act_1154268958403844", tokenEnv: "META_ACCESS_TOKEN" },
+	// Ben & Frank Chile (portfolio 535213187088751, factura en USD).
+	{ key: "benandfrank-cl", brand: "benandfrank", country: "cl", account: process.env.META_AD_ACCOUNT_BNF_CL || "act_555078075352542", tokenEnv: "META_ACCESS_TOKEN_CL" },
+];
 
-if (!META_ACCESS_TOKEN) {
+// Cuenta que se está procesando (token y marca/país destino).
+let CURRENT = null;
+
+if (!ACCOUNTS.some((a) => process.env[a.tokenEnv])) {
 	console.error(
 		"Falta META_ACCESS_TOKEN en .env. Es el token de solo lectura (scope ads_read) que compartió Sam.",
 	);
@@ -150,7 +158,7 @@ function stripToken(url) {
 function withToken(url) {
 	if (!url) return url;
 	const u = new URL(url);
-	u.searchParams.set("access_token", META_ACCESS_TOKEN);
+	u.searchParams.set("access_token", CURRENT.token);
 	return u.toString();
 }
 
@@ -220,7 +228,11 @@ function clearState(brand) {
 	}
 }
 
-function mergeIntoTuning(brand, extractedTexts) {
+function mergeIntoTuning(key, extractedTexts) {
+	// key = carpeta de progreso de la cuenta; los textos van a la marca destino.
+	const brand = CURRENT?.brand || key;
+	const country = CURRENT?.country || "mx";
+	if (country !== "mx") extractedTexts = extractedTexts.map((e) => ({ ...e, country }));
 	const dir = path.join(ROOT, "data", brand);
 	fs.mkdirSync(dir, { recursive: true });
 	const tuningPath = path.join(dir, "tuning.json");
@@ -251,7 +263,7 @@ function mergeIntoTuning(brand, extractedTexts) {
 
 	fs.writeFileSync(tuningPath, JSON.stringify(merged, null, 2));
 	console.log(
-		`[${brand}] ${added} textos nuevos agregados a data/${brand}/tuning.json (total ahora: ${merged.length}). ` +
+		`[${key}] ${added} textos nuevos agregados a data/${brand}/tuning.json (total ahora: ${merged.length}). ` +
 			`${skippedLong} descartados por ser demasiado largos.`,
 	);
 	return added;
@@ -263,7 +275,7 @@ async function processBackfill(brand, accountId, startedAt) {
 	let state = loadState(brand);
 	if (!state) {
 		state = {
-			nextUrl: `${BASE_URL}/${accountId}/ads?fields=${encodeURIComponent(FIELDS)}&limit=${PAGE_LIMIT}&access_token=${META_ACCESS_TOKEN}`,
+			nextUrl: `${BASE_URL}/${accountId}/ads?fields=${encodeURIComponent(FIELDS)}&limit=${PAGE_LIMIT}&access_token=${CURRENT.token}`,
 			extracted: [],
 			page: 0,
 			adsCount: 0,
@@ -343,7 +355,7 @@ async function processIncremental(brand, accountId, doneInfo, startedAt) {
 	const filtering = encodeURIComponent(
 		JSON.stringify([{ field: "created_time", operator: "GREATER_THAN", value: sinceUnix }]),
 	);
-	let url = `${BASE_URL}/${accountId}/ads?fields=${encodeURIComponent(FIELDS)}&limit=${PAGE_LIMIT}&filtering=${filtering}&access_token=${META_ACCESS_TOKEN}`;
+	let url = `${BASE_URL}/${accountId}/ads?fields=${encodeURIComponent(FIELDS)}&limit=${PAGE_LIMIT}&filtering=${filtering}&access_token=${CURRENT.token}`;
 
 	console.log(`[${brand}] refresh incremental: buscando anuncios creados después de ${sinceIso}...`);
 	let extracted = [];
@@ -414,8 +426,16 @@ async function processAccount(brand, accountId, startedAt) {
 async function main() {
 	const startedAt = Date.now();
 	const results = {};
-	for (const [brand, accountId] of Object.entries(ACCOUNTS)) {
-		console.log(`\n[${brand}] Cuenta ${accountId}`);
+	for (const acc of ACCOUNTS) {
+		const token = process.env[acc.tokenEnv];
+		if (!token) {
+			console.log(`\n[${acc.key}] Sin ${acc.tokenEnv}: se omite esta cuenta.`);
+			continue;
+		}
+		CURRENT = { ...acc, token };
+		const brand = acc.key;
+		const accountId = acc.account;
+		console.log(`\n[${brand}] Cuenta ${accountId}${acc.country !== "mx" ? ` (${acc.country.toUpperCase()} → data/${acc.brand})` : ""}`);
 		// El límite de tasa de Meta es por cuenta de anuncios, así que si una marca se
 		// throttlea seguimos con la otra en vez de parar todo -- cada cuenta guarda su
 		// propio progreso y se retoma por separado.

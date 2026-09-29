@@ -25,7 +25,7 @@ import { fileURLToPath } from "url";
 import { normalizeCopy } from "../copy-engine.mjs";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const TOKEN = process.env.META_ACCESS_TOKEN;
+let TOKEN = null; // token de la cuenta que se está procesando (ver main)
 const API = `https://graph.facebook.com/${process.env.META_API_VERSION || "v25.0"}`;
 const SINCE = process.env.AD_PERF_SINCE || "2022-01-01";
 const MAX_RUNTIME_MS = Number(process.env.AD_PERF_MAX_RUNTIME_MS) || 100_000;
@@ -36,12 +36,16 @@ const CTR_PRIOR_IMPRESSIONS = 5000; // suavizado: textos con pocas impresiones t
 const MAX_TEXT_LENGTH = 400;
 const PURCHASE_TYPES = ["omni_purchase", "offsite_conversion.fb_pixel_purchase", "purchase"];
 
-const ACCOUNTS = {
-	benandfrank: "act_10154078421154698",
-	bombavista: "act_1154268958403844",
-};
+// key = carpeta del cache (data/<key>/); el desempeño se junta en data/<brand>/performance.json.
+// Cada cuenta se rankea por separado (su propia mediana de CTR y su propio costo por
+// compra -- Chile factura en USD) y los textos de otros países llevan country.
+const ACCOUNTS = [
+	{ key: "benandfrank", brand: "benandfrank", country: "mx", account: "act_10154078421154698", tokenEnv: "META_ACCESS_TOKEN" },
+	{ key: "bombavista", brand: "bombavista", country: "mx", account: "act_1154268958403844", tokenEnv: "META_ACCESS_TOKEN" },
+	{ key: "benandfrank-cl", brand: "benandfrank", country: "cl", account: process.env.META_AD_ACCOUNT_BNF_CL || "act_555078075352542", tokenEnv: "META_ACCESS_TOKEN_CL" },
+];
 
-if (!TOKEN) {
+if (!ACCOUNTS.some((a) => process.env[a.tokenEnv])) {
 	console.error("Falta META_ACCESS_TOKEN.");
 	process.exit(1);
 }
@@ -320,15 +324,28 @@ async function findPublished(perfByBrand) {
 
 async function main() {
 	const perfByBrand = {};
+	const completeByBrand = {};
 	let pending = false;
-	for (const [brand, account] of Object.entries(ACCOUNTS)) {
+	for (const acc of ACCOUNTS) {
+		TOKEN = process.env[acc.tokenEnv];
+		const brand = acc.key;
+		const account = acc.account;
 		const dir = path.join(ROOT, "data", brand);
+		if (!TOKEN) {
+			// Sin token: se reusa el cache que ya haya (si existe) para no perder esos textos.
+			if (!fs.existsSync(path.join(dir, ".ad-insights.json"))) {
+				console.log(`[${brand}] Sin ${acc.tokenEnv}: se omite esta cuenta.`);
+				continue;
+			}
+		}
+		fs.mkdirSync(dir, { recursive: true });
 		const insightsPath = path.join(dir, ".ad-insights.json");
 		const textsPath = path.join(dir, ".ad-texts.json");
 		const cache = readJson(insightsPath, { quarters: {} });
 		const texts = readJson(textsPath, {});
 		let status = "done";
 		try {
+			if (!TOKEN) throw new Throttled(`sin ${acc.tokenEnv}, se usa el cache`);
 			status = await fetchInsights(brand, account, cache, () => writeJson(insightsPath, cache));
 			if (status === "done") status = await fetchTexts(brand, account, cache, texts, () => writeJson(textsPath, texts));
 		} catch (err) {
@@ -345,18 +362,25 @@ async function main() {
 		if (status !== "done") pending = true;
 
 		const items = buildPerformance(cache, texts);
-		perfByBrand[brand] = items;
-		writeJson(
-			path.join(dir, "performance.json"),
-			{
-				generatedAt: new Date().toISOString(),
-				metric: "CTR de link suavizado (70%) + costo por compra (30%) cuando hay ≥3 compras",
-				complete: status === "done",
-				items,
-			},
-		);
+		if (acc.country !== "mx") for (const t of items) t.country = acc.country;
 		const top = items.filter((t) => t.score >= 0.8).length;
-		console.log(`[${brand}] performance.json: ${items.length} textos con score (${top} con score ≥ 0.8).`);
+		console.log(`[${brand}] ${items.length} textos con score (${top} con score ≥ 0.8).`);
+		// Se juntan por marca: si el mismo texto corrió en dos países, se queda el mejor score.
+		const merged = new Map((perfByBrand[acc.brand] || []).map((t) => [t.key, t]));
+		for (const t of items) if (!merged.has(t.key) || merged.get(t.key).score < t.score) merged.set(t.key, t);
+		perfByBrand[acc.brand] = [...merged.values()].sort((a, b) => b.score - a.score);
+		completeByBrand[acc.brand] = (completeByBrand[acc.brand] ?? true) && status === "done";
+	}
+	for (const [brand, items] of Object.entries(perfByBrand)) {
+		writeJson(path.join(ROOT, "data", brand, "performance.json"), {
+			generatedAt: new Date().toISOString(),
+			metric: "CTR de link suavizado (70%) + costo por compra (30%) cuando hay ≥3 compras",
+			complete: completeByBrand[brand],
+			items,
+		});
+		const byCountry = {};
+		for (const t of items) byCountry[t.country || "mx"] = (byCountry[t.country || "mx"] || 0) + 1;
+		console.log(`[${brand}] performance.json: ${items.length} textos con score ${JSON.stringify(byCountry)}.`);
 	}
 	try {
 		await findPublished(perfByBrand);
