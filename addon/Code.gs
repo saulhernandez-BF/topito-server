@@ -58,15 +58,25 @@ function abrirSidebar_(accion) {
 // ---------------------------------------------------------------------------
 // Host (Docs o Sheets)
 // ---------------------------------------------------------------------------
+// OJO: en onOpen/onInstall (AuthMode.NONE, antes de autorizar en ese archivo)
+// DocumentApp.getActiveDocument() truena aunque estemos en Docs, así que el
+// host se detecta con getUi(), que sí funciona sin autorización y truena
+// ("Cannot call DocumentApp.getUi() from this context") si estamos en Sheets.
 function host_() {
   try {
-    if (DocumentApp.getActiveDocument()) return 'docs';
-  } catch (e) {}
-  return 'sheets';
+    DocumentApp.getUi();
+    return 'docs';
+  } catch (e) {
+    return 'sheets';
+  }
 }
 
 function getUi_() {
-  return host_() === 'docs' ? DocumentApp.getUi() : SpreadsheetApp.getUi();
+  try {
+    return DocumentApp.getUi();
+  } catch (e) {
+    return SpreadsheetApp.getUi();
+  }
 }
 
 // ---------------------------------------------------------------------------
