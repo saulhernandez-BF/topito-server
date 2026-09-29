@@ -1653,7 +1653,7 @@ app.post("/addon/feedback", async (req, res) => {
 			source: rating === "bad" ? `${source || "addon"}-explicito` : source || "addon",
 			brand,
 			author: user,
-			channel: surface === "docs" ? "docs" : "sheets",
+			channel: ["docs", "slides"].includes(surface) ? surface : "sheets",
 			country: resolveCountry(req.body?.country),
 			clientKey: typeof clientKey === "string" ? clientKey.slice(0, 64) : null,
 			reasons,

@@ -1,11 +1,12 @@
 /**
- * Topito para Google Docs y Google Sheets (complemento de editor, dominio B&F).
+ * Topito para Google Docs, Sheets y Slides (complemento de editor, dominio B&F).
  *
  * Qué hace:
  *   • Menú Extensiones → Topito: abrir la barra lateral, reescribir / revisar
  *     ortografía / tropicalizar la selección.
  *   • Barra lateral: Crear, Reescribir, Ortografía y Tropicalizar con marca,
  *     país (MX/CO/CL) y formato; Reemplazar selección o Insertar; 👍 ⚪ 👎 con motivo.
+ *   • Slides: revisar la ortografía de toda la presentación (con revisión antes de aplicar).
  *   • Sheets: "Procesar cada celda" (escribe el resultado en la columna de la
  *     derecha) y fórmulas =TOPITO(), =TOPITO_REESCRIBIR(), =TOPITO_TROPICALIZAR().
  *
@@ -34,20 +35,24 @@ function onInstall(e) {
 }
 
 function onOpen(e) {
-  getUi_()
+  var menu = getUi_()
     .createAddonMenu()
     .addItem('✍️ Abrir Topito', 'abrirTopito')
     .addSeparator()
     .addItem('🔁 Reescribir selección', 'menuReescribir')
     .addItem('🔤 Revisar ortografía de la selección', 'menuOrtografia')
-    .addItem('🌎 Tropicalizar selección (CO / CL)', 'menuTropicalizar')
-    .addToUi();
+    .addItem('🌎 Tropicalizar selección (CO / CL)', 'menuTropicalizar');
+  if (host_() === 'slides') {
+    menu.addSeparator().addItem('📑 Revisar ortografía de toda la presentación', 'menuOrtografiaDeck');
+  }
+  menu.addToUi();
 }
 
 function abrirTopito() { abrirSidebar_(null); }
 function menuReescribir() { abrirSidebar_('reescribir'); }
 function menuOrtografia() { abrirSidebar_('ortografia'); }
 function menuTropicalizar() { abrirSidebar_('tropicalizar'); }
+function menuOrtografiaDeck() { abrirSidebar_('deck'); }
 
 function abrirSidebar_(accion) {
   var t = HtmlService.createTemplateFromFile('Sidebar');
@@ -56,34 +61,30 @@ function abrirSidebar_(accion) {
 }
 
 // ---------------------------------------------------------------------------
-// Host (Docs o Sheets)
+// Host (Docs, Sheets o Slides)
 // ---------------------------------------------------------------------------
 // OJO: en onOpen/onInstall (AuthMode.NONE, antes de autorizar en ese archivo)
 // DocumentApp.getActiveDocument() truena aunque estemos en Docs, así que el
 // host se detecta con getUi(), que sí funciona sin autorización y truena
 // ("Cannot call DocumentApp.getUi() from this context") si estamos en Sheets.
 function host_() {
-  try {
-    DocumentApp.getUi();
-    return 'docs';
-  } catch (e) {
-    return 'sheets';
-  }
+  try { DocumentApp.getUi(); return 'docs'; } catch (e) {}
+  try { SlidesApp.getUi(); return 'slides'; } catch (e) {}
+  return 'sheets';
 }
 
 function getUi_() {
-  try {
-    return DocumentApp.getUi();
-  } catch (e) {
-    return SpreadsheetApp.getUi();
-  }
+  try { return DocumentApp.getUi(); } catch (e) {}
+  try { return SlidesApp.getUi(); } catch (e) {}
+  return SpreadsheetApp.getUi();
 }
 
 // ---------------------------------------------------------------------------
 // Selección
 // ---------------------------------------------------------------------------
-/** Texto seleccionado (Docs: selección; Sheets: celdas seleccionadas). */
+/** Texto seleccionado (Docs: selección; Sheets: celdas; Slides: texto o cuadros). */
 function leerSeleccion() {
+  if (host_() === 'slides') return slidesLeerSeleccion_();
   if (host_() === 'docs') {
     var sel = DocumentApp.getActiveDocument().getSelection();
     if (!sel) return '';
@@ -103,6 +104,7 @@ function leerSeleccion() {
 
 /** Reemplaza la selección por el texto (o lo inserta en el cursor / celda activa). */
 function reemplazarSeleccion(texto) {
+  if (host_() === 'slides') return slidesReemplazar_(texto);
   if (host_() === 'docs') {
     var doc = DocumentApp.getActiveDocument();
     var sel = doc.getSelection();
@@ -136,6 +138,7 @@ function reemplazarSeleccion(texto) {
 
 /** Inserta sin borrar: Docs en el cursor (o al final); Sheets en la celda a la derecha. */
 function insertarTexto(texto) {
+  if (host_() === 'slides') return slidesInsertar_(texto);
   if (host_() === 'docs') {
     var doc = DocumentApp.getActiveDocument();
     var cursor = doc.getCursor();
@@ -322,4 +325,157 @@ function TOPITO_REESCRIBIR(texto, formato, marca, pais, opciones) {
  */
 function TOPITO_TROPICALIZAR(texto, pais, marca) {
   return formula_('tropicalizar', texto, 'general', marca, pais || 'co', 1);
+}
+
+
+// ---------------------------------------------------------------------------
+// Slides
+// ---------------------------------------------------------------------------
+// Shapes (cuadros de texto) seleccionados, incluyendo los que están dentro de grupos.
+function slidesShapesDe_(elements) {
+  var out = [];
+  (elements || []).forEach(function (el) {
+    var t = el.getPageElementType();
+    if (t === SlidesApp.PageElementType.SHAPE) out.push(el.asShape());
+    else if (t === SlidesApp.PageElementType.GROUP) out = out.concat(slidesShapesDe_(el.asGroup().getChildren()));
+  });
+  return out.filter(function (sh) { try { return !!sh.getText(); } catch (e) { return false; } });
+}
+
+function slidesLeerSeleccion_() {
+  var sel = SlidesApp.getActivePresentation().getSelection();
+  if (!sel) return '';
+  var tipo = sel.getSelectionType();
+  if (tipo === SlidesApp.SelectionType.TEXT) {
+    var tr = sel.getTextRange();
+    return tr ? tr.asString().replace(/\n$/, '') : '';
+  }
+  if (tipo === SlidesApp.SelectionType.PAGE_ELEMENT) {
+    return slidesShapesDe_(sel.getPageElementRange().getPageElements())
+      .map(function (sh) { return sh.getText().asString().replace(/\n$/, ''); })
+      .filter(function (t) { return t.trim(); }).join('\n');
+  }
+  if (tipo === SlidesApp.SelectionType.TABLE_CELL) {
+    return sel.getTableCellRange().getTableCells()
+      .map(function (c) { return c.getText().asString().replace(/\n$/, ''); })
+      .filter(function (t) { return t.trim(); }).join('\n');
+  }
+  return '';
+}
+
+function slidesReemplazar_(texto) {
+  var sel = SlidesApp.getActivePresentation().getSelection();
+  var tipo = sel ? sel.getSelectionType() : null;
+  if (tipo === SlidesApp.SelectionType.TEXT && sel.getTextRange()) {
+    sel.getTextRange().setText(texto);
+    return 'ok';
+  }
+  if (tipo === SlidesApp.SelectionType.PAGE_ELEMENT) {
+    var shapes = slidesShapesDe_(sel.getPageElementRange().getPageElements());
+    if (shapes.length) { shapes[0].getText().setText(texto); return 'ok'; }
+  }
+  if (tipo === SlidesApp.SelectionType.TABLE_CELL) {
+    var cells = sel.getTableCellRange().getTableCells();
+    if (cells.length) { cells[0].getText().setText(texto); return 'ok'; }
+  }
+  return slidesInsertar_(texto);
+}
+
+/** Inserta en el cursor si hay uno; si no, crea un cuadro de texto en la diapositiva actual. */
+function slidesInsertar_(texto) {
+  var pres = SlidesApp.getActivePresentation();
+  var sel = pres.getSelection();
+  if (sel && sel.getSelectionType() === SlidesApp.SelectionType.TEXT) {
+    var tr = sel.getTextRange();
+    if (tr && tr.isEmpty()) { tr.setText(texto); return 'ok'; }
+  }
+  var page = sel && sel.getCurrentPage();
+  if (!page) page = pres.getSlides()[0];
+  if (!page) throw new Error('La presentación no tiene diapositivas.');
+  page.insertTextBox(texto, 40, 40, 420, 120);
+  return 'ok-cuadro';
+}
+
+var MAX_TEXTOS_DECK = 80;
+
+// Todos los textos de la presentación: cuadros, formas, grupos y celdas de tablas.
+function slidesTextosDeck_() {
+  var out = [];
+  SlidesApp.getActivePresentation().getSlides().forEach(function (slide, i) {
+    function visitar(el) {
+      var t = el.getPageElementType();
+      if (t === SlidesApp.PageElementType.GROUP) return el.asGroup().getChildren().forEach(visitar);
+      if (t === SlidesApp.PageElementType.SHAPE) {
+        var txt;
+        try { txt = el.asShape().getText().asString().replace(/\n$/, ''); } catch (e) { return; }
+        if (txt.trim()) out.push({ id: slide.getObjectId() + '|' + el.getObjectId(), slide: i + 1, text: txt });
+      } else if (t === SlidesApp.PageElementType.TABLE) {
+        var tb = el.asTable();
+        for (var r = 0; r < tb.getNumRows(); r++) {
+          for (var c = 0; c < tb.getNumColumns(); c++) {
+            var cell;
+            try { cell = tb.getCell(r, c); } catch (e) { continue; } // celdas combinadas
+            var ct = cell.getText().asString().replace(/\n$/, '');
+            if (ct.trim()) out.push({ id: slide.getObjectId() + '|' + el.getObjectId() + '|' + r + '|' + c, slide: i + 1, text: ct });
+          }
+        }
+      }
+    }
+    slide.getPageElements().forEach(visitar);
+  });
+  return out;
+}
+
+function mismoTexto_(a, b) {
+  var n = function (t) { return String(t || '').normalize('NFC').replace(/[\s ​]+/g, ' ').trim(); };
+  return n(a) === n(b);
+}
+
+/**
+ * Revisa la ortografía de toda la presentación. No cambia nada: devuelve la
+ * lista de correcciones para que la persona las revise en la barra lateral.
+ */
+function revisarPresentacion(req) {
+  if (host_() !== 'slides') throw new Error('Solo en Google Slides.');
+  var textos = slidesTextosDeck_();
+  var cambios = [];
+  var revisados = 0;
+  var started = Date.now();
+  for (var k = 0; k < textos.length; k++) {
+    if (revisados >= MAX_TEXTOS_DECK || Date.now() - started > 5 * 60 * 1000) {
+      return { cambios: cambios, revisados: revisados, total: textos.length, pendientes: true };
+    }
+    var t = textos[k];
+    try {
+      var data = pedirCopy({ action: 'ortografia', text: t.text, brand: req.brand });
+      var corr = data.options && data.options[0] ? data.options[0].text : '';
+      if (corr && !mismoTexto_(corr, t.text)) cambios.push({ id: t.id, slide: t.slide, original: t.text, corrected: corr });
+    } catch (err) {
+      cambios.push({ id: t.id, slide: t.slide, original: t.text, error: String(err.message || err).slice(0, 120) });
+    }
+    revisados++;
+  }
+  return { cambios: cambios, revisados: revisados, total: textos.length, pendientes: false };
+}
+
+/** Aplica las correcciones aceptadas. items: [{id, original, corrected}] */
+function aplicarCorreccionesDeck(items) {
+  var pres = SlidesApp.getActivePresentation();
+  var hechas = 0;
+  (items || []).forEach(function (it) {
+    var parts = String(it.id).split('|');
+    var slide = pres.getSlideById(parts[0]);
+    if (!slide) return;
+    var el = slide.getPageElementById(parts[1]);
+    if (!el) return;
+    var tr;
+    if (parts.length === 4) tr = el.asTable().getCell(Number(parts[2]), Number(parts[3])).getText();
+    else tr = el.asShape().getText();
+    // replaceAllText conserva mejor el formato que setText; si el texto cambió
+    // desde la revisión y ya no coincide, no se toca.
+    var n = tr.replaceAllText(it.original, it.corrected, true);
+    if (n === 0 && mismoTexto_(tr.asString(), it.original)) { tr.setText(it.corrected); n = 1; } // textos de varios párrafos
+    if (n > 0) hechas++;
+  });
+  return { hechas: hechas };
 }

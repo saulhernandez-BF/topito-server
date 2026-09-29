@@ -38,6 +38,10 @@
       .chip.on { border-color: var(--ink); background: #f1f1ec; }
       .refs { font-size: 11px; color: var(--soft); margin-top: 8px; }
       .spacer { flex: 1; }
+      .deckitem { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; margin-top: 8px; }
+      .deckitem .orig { color: var(--soft); text-decoration: line-through; white-space: pre-wrap; }
+      .deckitem .corr { white-space: pre-wrap; margin-top: 2px; }
+      .deckitem.done { opacity: .45; }
     </style>
   </head>
   <body>
@@ -49,6 +53,7 @@
       <span class="tab" data-a="reescribir">🔁 Reescribir</span>
       <span class="tab" data-a="ortografia">🔤 Ortografía</span>
       <span class="tab" data-a="tropicalizar">🌎 Tropicalizar</span>
+      <span class="tab" data-a="deck" id="deckTab" style="display:none">📑 Toda la presentación</span>
     </div>
 
     <div class="row">
@@ -59,6 +64,7 @@
 
     <label id="textLabel">¿Qué necesitas?</label>
     <textarea id="text" placeholder=""></textarea>
+    <div class="sub" id="deckInfo" style="display:none;margin:8px 0 0">Revisa la ortografía de todos los cuadros de texto y tablas de la presentación. No se cambia nada hasta que aceptes.</div>
     <div class="actions">
       <span class="btn primary" id="go">Generar</span>
       <span class="link" id="useSel">Usar selección</span>
@@ -84,7 +90,9 @@
         reescribir: ['Texto a reescribir', 'Selecciona texto en el documento o pégalo aquí', 'Reescribir'],
         ortografia: ['Texto a revisar', 'Selecciona texto en el documento o pégalo aquí', 'Revisar'],
         tropicalizar: ['Copy de México', 'Selecciona el copy mexicano o pégalo aquí', 'Tropicalizar'],
+        deck: ['', '', 'Revisar presentación'],
       };
+      var LUGAR = { docs: 'documento', sheets: 'Sheet', slides: 'presentación' };
 
       function setAction(a) {
         state.action = a;
@@ -95,12 +103,17 @@
         $('formatBox').style.display = a === 'crear' || a === 'reescribir' ? '' : 'none';
         $('countryBox').style.display = a === 'ortografia' ? 'none' : '';
         $('cells').style.display = state.host === 'sheets' && a !== 'crear' ? '' : 'none';
-        if (a !== 'crear' && !$('text').value.trim()) useSelection();
+        var deck = a === 'deck';
+        $('countryBox').style.display = a === 'ortografia' || deck ? 'none' : '';
+        ['textLabel', 'text', 'useSel'].forEach(function (id) { $(id).style.display = deck ? 'none' : ''; });
+        $('deckInfo').style.display = deck ? '' : 'none';
+        $('results').innerHTML = '';
+        if (a !== 'crear' && !deck && !$('text').value.trim()) useSelection();
       }
 
       function useSelection() {
         google.script.run.withSuccessHandler(function (t) {
-          if (t) { $('text').value = t; msg(''); } else if (state.action !== 'crear') msg('Selecciona texto en el ' + (state.host === 'docs' ? 'documento' : 'Sheet') + ' o pégalo aquí.');
+          if (t) { $('text').value = t; msg(''); } else if (state.action !== 'crear') msg('Selecciona texto en ' + (state.host === 'slides' ? 'la ' : 'el ') + LUGAR[state.host] + ' o pégalo aquí.');
         }).leerSeleccion();
       }
 
@@ -115,6 +128,7 @@
       }
 
       function go() {
+        if (state.action === 'deck') return revisarDeck();
         var r = req();
         if (!r.text.trim()) return msg(state.action === 'crear' ? 'Escribe qué necesitas.' : 'No hay texto: selecciona o pega uno.', true);
         busy(true); msg('✍️ Topito está escribiendo…'); $('results').innerHTML = '';
@@ -144,7 +158,7 @@
             (o.warnings && o.warnings.length ? '<div class="warn"></div>' : '') +
             '<div class="bar">' +
             '<span class="btn small" data-do="replace">Reemplazar selección</span>' +
-            '<span class="btn small" data-do="insert">' + (state.host === 'docs' ? 'Insertar' : 'A la derecha') + '</span>' +
+            '<span class="btn small" data-do="insert">' + (state.host === 'sheets' ? 'A la derecha' : 'Insertar') + '</span>' +
             '<span class="btn small" data-do="copy">Copiar</span>' +
             '<span class="spacer"></span>' +
             (r.action === 'ortografia' ? '' : '<span class="rate" data-r="like" title="Me encanta">👍</span><span class="rate" data-r="neutral" title="Sirve con ajustes">⚪</span><span class="rate" data-r="bad" title="No va">👎</span>') +
@@ -172,6 +186,56 @@
           refs.textContent = '📚 Inspirado en ' + data.references.count + ' ejemplos reales' + (data.references.topPerformers ? ' (' + data.references.topPerformers + ' ★ de los que mejor funcionaron)' : '');
           box.appendChild(refs);
         }
+      }
+
+      // --- Slides: ortografía de toda la presentación ---
+      function revisarDeck() {
+        busy(true); $('results').innerHTML = '';
+        msg('🔤 Revisando toda la presentación… (unos segundos por cuadro de texto)');
+        google.script.run
+          .withSuccessHandler(function (o) { busy(false); renderDeck(o); })
+          .withFailureHandler(function (e) { busy(false); msg('😕 ' + (e.message || e), true); })
+          .revisarPresentacion({ brand: $('brand').value });
+      }
+
+      function renderDeck(o) {
+        var box = $('results');
+        var cambios = o.cambios.filter(function (c) { return !c.error; });
+        var errores = o.cambios.length - cambios.length;
+        var extra = (o.pendientes ? ' Revisé ' + o.revisados + ' de ' + o.total + '; vuelve a correrlo para el resto.' : '') + (errores ? ' ⚠️ ' + errores + ' no se pudieron revisar.' : '');
+        if (!cambios.length) { msg('✅ Sin errores de ortografía en ' + o.revisados + ' textos.' + extra); return; }
+        msg(cambios.length + ' corrección(es) en ' + o.revisados + ' textos. Revisa antes de aplicar.' + extra);
+        var todo = document.createElement('div');
+        todo.className = 'actions';
+        todo.innerHTML = '<span class="btn primary small" id="applyAll">Aplicar todo</span>';
+        box.appendChild(todo);
+        cambios.forEach(function (c) {
+          var d = document.createElement('div');
+          d.className = 'deckitem';
+          d.innerHTML = '<div class="lab" style="font-size:11px;color:var(--soft)"></div><div class="orig"></div><div class="corr"></div><div class="bar" style="display:flex;margin-top:6px"><span class="btn small">Usar</span></div>';
+          d.querySelector('.lab').textContent = 'Diapositiva ' + c.slide;
+          d.querySelector('.orig').textContent = c.original;
+          d.querySelector('.corr').textContent = c.corrected;
+          d.querySelector('.btn').onclick = function () { aplicar([c], [d]); };
+          c._el = d;
+          box.appendChild(d);
+        });
+        $('applyAll').onclick = function () {
+          var pend = cambios.filter(function (c) { return !c._el.classList.contains('done'); });
+          aplicar(pend, pend.map(function (c) { return c._el; }));
+        };
+      }
+
+      function aplicar(items, els) {
+        if (!items.length) return;
+        msg('✍️ Aplicando…');
+        google.script.run
+          .withSuccessHandler(function (r) {
+            els.forEach(function (e) { e.classList.add('done'); e.querySelector('.btn').textContent = '✓'; });
+            msg('✅ ' + r.hechas + ' corrección(es) aplicada(s)' + (r.hechas < items.length ? ' — algunos textos cambiaron desde la revisión y se omitieron.' : '.'));
+          })
+          .withFailureHandler(function (e) { msg('😕 ' + (e.message || e), true); })
+          .aplicarCorreccionesDeck(items.map(function (c) { return { id: c.id, original: c.original, corrected: c.corrected }; }));
       }
 
       function rate(card, fb, rating) {
@@ -204,6 +268,7 @@
       }
 
       // Arranque
+      if (state.host === 'slides') $('deckTab').style.display = '';
       document.querySelectorAll('.tab').forEach(function (t) { t.onclick = function () { setAction(t.dataset.a); }; });
       $('go').onclick = go;
       $('cells').onclick = cells;
