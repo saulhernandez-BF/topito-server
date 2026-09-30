@@ -43,6 +43,8 @@ const ACCOUNTS = [
 	{ key: "benandfrank", brand: "benandfrank", country: "mx", account: "act_10154078421154698", tokenEnv: "META_ACCESS_TOKEN" },
 	{ key: "bombavista", brand: "bombavista", country: "mx", account: "act_1154268958403844", tokenEnv: "META_ACCESS_TOKEN" },
 	{ key: "benandfrank-cl", brand: "benandfrank", country: "cl", account: process.env.META_AD_ACCOUNT_BNF_CL || "act_555078075352542", tokenEnv: "META_ACCESS_TOKEN_CL" },
+	// Ben & Frank Colombia (portfolio 936874490775298, factura en USD).
+	{ key: "benandfrank-co", brand: "benandfrank", country: "co", account: process.env.META_AD_ACCOUNT_BNF_CO || "act_1442364080024241", tokenEnv: "META_ACCESS_TOKEN_CO" },
 ];
 
 if (!ACCOUNTS.some((a) => process.env[a.tokenEnv])) {

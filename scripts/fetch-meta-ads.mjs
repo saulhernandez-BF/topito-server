@@ -1,5 +1,5 @@
 // Extrae los copys (título + texto principal) de los anuncios de Meta Ads para
-// Ben & Frank MX, Bombavista MX y Ben & Frank Chile, y los agrega a data/<marca>/tuning.json (sin
+// Ben & Frank MX, Bombavista MX, Ben & Frank Chile y Ben & Frank Colombia, y los agrega a data/<marca>/tuning.json (sin
 // duplicar lo que ya había). Requiere META_ACCESS_TOKEN en .env (ver .env.example).
 //
 // Primera corrida (backfill completo): se puede correr varias veces seguidas --
@@ -47,6 +47,8 @@ const ACCOUNTS = [
 	{ key: "bombavista", brand: "bombavista", country: "mx", account: "act_1154268958403844", tokenEnv: "META_ACCESS_TOKEN" },
 	// Ben & Frank Chile (portfolio 535213187088751, factura en USD).
 	{ key: "benandfrank-cl", brand: "benandfrank", country: "cl", account: process.env.META_AD_ACCOUNT_BNF_CL || "act_555078075352542", tokenEnv: "META_ACCESS_TOKEN_CL" },
+	// Ben & Frank Colombia (portfolio 936874490775298, factura en USD).
+	{ key: "benandfrank-co", brand: "benandfrank", country: "co", account: process.env.META_AD_ACCOUNT_BNF_CO || "act_1442364080024241", tokenEnv: "META_ACCESS_TOKEN_CO" },
 ];
 
 // Cuenta que se está procesando (token y marca/país destino).
