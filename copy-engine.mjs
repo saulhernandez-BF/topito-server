@@ -50,7 +50,15 @@ export function outputInstructions({ formatDef, angles, count = 4 }) {
 
 // Extrae las opciones del texto del modelo. Si no viene JSON válido, cae al
 // formato viejo de lista ("* opción") para no romper nada.
+// Los ejemplos de referencia llevan marcadores (★ = mejor desempeño, 🇨🇱/🇨🇴 = anuncio
+// de ese país). A veces el modelo los copia al inicio de sus opciones: se quitan.
+const MARKER_RE = /(^|["\n])[ \t]*(?:★|🇨🇱|🇨🇴|🇲🇽)[ \t]*/g;
+export function stripReferenceMarkers(raw) {
+	return String(raw || "").replace(MARKER_RE, "$1");
+}
+
 export function parseCopyResponse(raw, formatDef) {
+	raw = stripReferenceMarkers(raw);
 	const fields = fieldsOf(formatDef);
 	const text = String(raw || "").replace(/```(?:json)?/gi, "").trim();
 	const start = text.indexOf("{");

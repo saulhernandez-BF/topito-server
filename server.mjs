@@ -1077,7 +1077,7 @@ Aquí tienes ejemplos de mi estilo extraídos de la web e instagram, elegidos po
 parecidos en tema a ${mode === "reescribir" ? "el texto que me pediste reescribir" : "lo que me pediste"}:
 
 ${reference.text}
-${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${reference.localExamples ? `\nLos marcados con ${COUNTRY_FLAGS[country] || country.toUpperCase()} son anuncios reales de la marca en ${COUNTRIES[country]?.label || country}: úsalos como guía del vocabulario y modismos locales.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${countryPrompt(brand, country)}${lessonsPrompt(brand)}${dislikesPrompt(brand)}
+${reference.topPerformers ? `\nLos marcados con ★ fueron los de MEJOR desempeño real en anuncios (más clics y mejor costo por compra): dales más peso a su estructura, arranque y llamado a la acción.\n` : ""}${reference.topPerformers || reference.localExamples ? `(Los marcadores ★ y las banderas son solo para ti: no los pongas en tus respuestas.)\n` : ""}${reference.localExamples ? `\nLos marcados con ${COUNTRY_FLAGS[country] || country.toUpperCase()} son anuncios reales de la marca en ${COUNTRIES[country]?.label || country}: úsalos como guía del vocabulario y modismos locales.\n` : ""}${formatGuidance}${storage.glossaryPrompt(brand)}${countryPrompt(brand, country)}${lessonsPrompt(brand)}${dislikesPrompt(brand)}
 ${task}
 ${outputInstructions({ formatDef, angles })}
 `;
