@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-30T15:47:35.965Z",
+  "generatedAt": "2026-10-01T16:16:29.000Z",
   "matches": [
     {
       "brand": "benandfrank",
@@ -7,9 +7,19 @@
       "adText": "Tus Ben & Frank hechos para ver(te) mejor\nPruébatelos en nuestro mágico probador virtual",
       "similarity": 0.86,
       "via": "slack",
-      "impressions": 15459643,
-      "ctr": 0.00453,
+      "impressions": 15847312,
+      "ctr": 0.00452,
       "score": 0.488
+    },
+    {
+      "brand": "benandfrank",
+      "topitoText": "Lentes de sol Ben & Frank, 3 y 6 MSI",
+      "adText": "Lentes de sol polarizados Ben & Frank",
+      "similarity": 0.8,
+      "via": "figma-inbox",
+      "impressions": 417853,
+      "ctr": 0.00661,
+      "score": 0.807
     }
   ]
 }
