@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-14T15:41:59.001Z",
+  "generatedAt": "2026-11-15T16:12:57.658Z",
   "matches": [
     {
       "brand": "benandfrank",
@@ -7,9 +7,9 @@
       "adText": "Tus Ben & Frank hechos para ver(te) mejor\nPruébatelos en nuestro mágico probador virtual",
       "similarity": 0.86,
       "via": "slack",
-      "impressions": 27485044,
+      "impressions": 27485045,
       "ctr": 0.00459,
-      "score": 0.657
+      "score": 0.658
     },
     {
       "brand": "benandfrank",
