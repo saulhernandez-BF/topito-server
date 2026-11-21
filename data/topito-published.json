@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-20T17:41:21.669Z",
+  "generatedAt": "2026-11-21T16:42:52.877Z",
   "matches": [
     {
       "brand": "benandfrank",
@@ -9,7 +9,7 @@
       "via": "slack",
       "impressions": 27485045,
       "ctr": 0.00459,
-      "score": 0.655
+      "score": 0.657
     },
     {
       "brand": "benandfrank",
@@ -19,7 +19,7 @@
       "via": "figma-inbox",
       "impressions": 417853,
       "ctr": 0.00661,
-      "score": 0.793
+      "score": 0.788
     }
   ]
 }
